@@ -1,7 +1,7 @@
 // TreeBuilder.cs - builds the flat stepped pine Christmas tree in SOLIDWORKS as individual
 // parts (.SLDPRT) plus one assembly (.SLDASM).
 //
-// Design: ONE flat plane of 42x42 pine. Each side has three parallel uprights. They overlap
+// Design: ONE flat plane of pine (W wide in the plane, T thick front to back; default 42x42). Each side has three parallel uprights. They overlap
 // 130 mm with their long faces touching (no wood cuts into other wood). Each lower upright
 // under-laps the one above: the top upright (P1) is on the outer line, the middle (P2) one
 // board-width inside it, the bottom (P3) one more inside. All lap ends are cut horizontal.
@@ -35,16 +35,17 @@ namespace PineTree
     class Cfg
     {
         public double H = 1210;         // apex height: tip of the wood above the underside of the rail (top of the feet)
-        public double BaseWidth = 622;  // length of the base rail = overall width of the base
+        public double BaseWidth = 922;  // length of the base rail = overall width of the base
         public double RailOverhang = 20;    // rail sticks out this far past the outside of each leg
         public double BaseScrewDepth = 50;  // how far the base coach screw goes into the leg end grain
-        public double W = 42;           // square section of the pine
+        public double W = 42;           // board width seen from the front (in the plane of the tree); also the rail height
+        public double T = 42;           // board thickness front to back (e.g. 90x45 on edge: --W 45 --T 90)
         public double Overlap = 130;    // vertical overlap of each lap
         public double L3 = 0;           // vertical extent of bottom upright; 0 = auto (470 at H 1210, scales with H)
         public double L1 = 0;           // vertical extent of top upright; 0 = auto (same rule). Middle one takes the rest.
         public double FootL = 450;      // foot length (front to back)
         public double BoltD = 6.5;      // clearance hole for M6 rod / bolt
-        public double CapNeckH = 42;    // printed cap neck thickness (front to back)
+        public double CapNeckH = 0;     // printed cap neck thickness (front to back); 0 = same as T
         public double CapPlateT = 12;   // printed star plate thickness
         public double StarR = 85;       // star outer radius
         public double StockLen = 1800;  // length of the pine you buy (only used for a warning)
@@ -87,6 +88,7 @@ namespace PineTree
         // rail end: (H - W) tan(phi) - 2 W / cos(phi) = BaseWidth / 2 - RailOverhang.
         public void Solve()
         {
+            if (CapNeckH <= 0) CapNeckH = T;
             if (L3 <= 0) L3 = Math.Round(H * 470 / 1210);
             if (L1 <= 0) L1 = Math.Round(H * 470 / 1210);
             double target = BaseWidth / 2 - RailOverhang;
@@ -271,7 +273,7 @@ namespace PineTree
             double y1lo = ha - c.L1;
             double y2hi = y1lo + c.Overlap;
 
-            const string stock = "42x42 DAR pine";
+            string stock = c.W.ToString("0") + "x" + c.T.ToString("0") + " pine";
             const string printed = "PETG print";
             double[] axisR = { sin, -cos }, axisL = { -sin, -cos };
             var list = new List<PartDef>();
@@ -292,20 +294,20 @@ namespace PineTree
 
             // P3: bottom upright, two boards in (under-laps P2), standing on the rail. Horizontal end cuts.
             var p3 = board(2, c.W, c.L3);                       // stands on top of the rail
-            list.Add(new PartDef { Name = "P3R", Stock = stock, Pts = p3, Bolts = lapLow, Depth = c.W, Axis = axisR });
-            list.Add(new PartDef { Name = "P3L", Stock = stock, Pts = Mirror(p3), Bolts = Mirror(lapLow), Depth = c.W, Axis = axisL });
+            list.Add(new PartDef { Name = "P3R", Stock = stock, Pts = p3, Bolts = lapLow, Depth = c.T, Axis = axisR });
+            list.Add(new PartDef { Name = "P3L", Stock = stock, Pts = Mirror(p3), Bolts = Mirror(lapLow), Depth = c.T, Axis = axisL });
 
             // P2: middle upright, one board in; over P3 (low), under P1 (high)
             var p2 = board(1, y2lo, y2hi);
             var b2 = lapLow.Concat(lapHigh).ToList();
-            list.Add(new PartDef { Name = "P2R", Stock = stock, Pts = p2, Bolts = b2, Depth = c.W, Axis = axisR });
-            list.Add(new PartDef { Name = "P2L", Stock = stock, Pts = Mirror(p2), Bolts = Mirror(b2), Depth = c.W, Axis = axisL });
+            list.Add(new PartDef { Name = "P2R", Stock = stock, Pts = p2, Bolts = b2, Depth = c.T, Axis = axisR });
+            list.Add(new PartDef { Name = "P2L", Stock = stock, Pts = Mirror(p2), Bolts = Mirror(b2), Depth = c.T, Axis = axisL });
 
             // P1: top upright, on the outer line, over P2; tip is cut vertically at x = 0 (72 deg from square)
             var p1 = new List<double[]> { P(0, ha), P(xo(y1lo, 0), y1lo), P(xo(y1lo, 0) - a, y1lo), P(0, ym) };
             var b1 = lapHigh.Concat(apex).ToList();
-            list.Add(new PartDef { Name = "P1R", Stock = stock, Pts = p1, Bolts = b1, Depth = c.W, Axis = axisR });
-            list.Add(new PartDef { Name = "P1L", Stock = stock, Pts = Mirror(p1), Bolts = Mirror(b1), Depth = c.W, Axis = axisL });
+            list.Add(new PartDef { Name = "P1R", Stock = stock, Pts = p1, Bolts = b1, Depth = c.T, Axis = axisR });
+            list.Add(new PartDef { Name = "P1L", Stock = stock, Pts = Mirror(p1), Bolts = Mirror(b1), Depth = c.T, Axis = axisL });
 
             // Base: the rail runs the full width (y = 0 .. W, square ends) and the bottom uprights stand on it.
             // The feet run front to back under the rail, one under each leg. Each side is held by one M6
@@ -313,20 +315,21 @@ namespace PineTree
             // is vertical while the leg leans, so it enters a little inside the leg centre and stays in the
             // wood for BaseScrewDepth.
             double sxr = xo(c.W, 2) - a / 2 - c.BaseScrewDepth / 2 * tan;
-            double railLen = 3 * c.W;
+            double footW = Math.Max(c.W, c.T), footH = Math.Min(c.W, c.T);   // foot lies wide face down
+            double railLen = 3 * (c.W + footH);
             list.Add(new PartDef
             {
-                Name = "RAIL", Stock = stock, Depth = c.W,
+                Name = "RAIL", Stock = stock, Depth = c.T,
                 Pts = Rect(-c.BaseWidth / 2, 0, c.BaseWidth / 2, c.W),
                 Bolts = { new Bolt(-sxr, c.W / 2, 0, 1, railLen), new Bolt(sxr, c.W / 2, 0, 1, railLen) }
             });
 
-            // Foot: 42x42, one part, two instances centred under the screws. Hole in the middle of its length.
+            // Foot: one part, two instances centred under the screws, wide face down. Hole in the middle of its length.
             list.Add(new PartDef
             {
                 Name = "FOOT", Stock = stock, Depth = c.FootL, Xs = new[] { -sxr, sxr },
-                Pts = new List<double[]> { P(-c.W / 2, -c.W), P(c.W / 2, -c.W), P(c.W / 2, 0), P(-c.W / 2, 0) },
-                Bolts = { new Bolt(0, -c.W / 2, 0, 1, railLen) }
+                Pts = Rect(-footW / 2, -footH, footW / 2, 0),
+                Bolts = { new Bolt(0, -footH / 2, 0, 1, railLen) }
             });
 
             // ---- printed star cap (same rules as geometry_check.py) ----
@@ -394,21 +397,21 @@ namespace PineTree
                 if (d.Name == "RAIL")
                 {
                     double fromEnd = c.BaseWidth / 2 - d.Bolts.Max(b => b.X);
-                    d.Props["Description"] = "Base rail, 42x42 pine";
+                    d.Props["Description"] = "Base rail, " + d.Stock;
                     d.Props["Ends"] = "square";
                     d.Props["Holes"] = f1(fromEnd) + " from each end, vertical, centred (base screws)";
                     continue;
                 }
                 if (d.Name == "FOOT")
                 {
-                    d.Props["Description"] = "Foot, 42x42 pine";
+                    d.Props["Description"] = "Foot, " + d.Stock + ", wide face down";
                     d.Props["Ends"] = "square";
                     d.Props["Holes"] = f1(c.FootL / 2) + " (middle), vertical, centred (base screw)";
                     continue;
                 }
 
                 string side = d.Name.EndsWith("R") ? "right" : "left";
-                d.Props["Description"] = names[d.Name.Substring(0, 2)] + " " + side + ", 42x42 pine";
+                d.Props["Description"] = names[d.Name.Substring(0, 2)] + " " + side + ", " + d.Stock;
                 d.Props["Ends"] = d.Name.StartsWith("P1")
                     ? "bottom " + f1(phi) + "° mitre; tip " + f1(90 - phi) + "° (cut vertical)"
                     : "both " + f1(phi) + "° mitre, parallel";
@@ -450,7 +453,7 @@ namespace PineTree
             lines.Add("");
             lines.Add(q(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "Height {0} mm, base {1} mm, slope {2:F2} deg. Holes {3} mm through the side face, centred in the {4} mm thickness.",
-                c.H, c.BaseWidth, c.PhiDeg, c.BoltD, c.W)));
+                c.H, c.BaseWidth, c.PhiDeg, c.BoltD, c.T)));
             lines.Add(q(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "Base: legs stand on the rail, rail on the feet. One M6 coach screw per side up through foot + rail into the leg end grain ({0:0} mm in, pilot 4.5 drilled through the rail hole).",
                 c.BaseScrewDepth)));
@@ -849,14 +852,16 @@ namespace PineTree
             string notes = string.Join(System.Environment.NewLine, new[] {
                 string.Format(inv, "PINE TREE  -  height {0:0} mm, base {1:0} mm, slope {2:0.0}\u00b0 from vertical", c.H, c.BaseWidth, c.PhiDeg),
                 "LENGTH is long point to long point. Mitre angles are measured from square (saw setting).",
-                string.Format(inv, "HOLES: \u00d8{0} mm, drilled through the side face, centred in the {1:0} mm thickness.", c.BoltD, c.W),
+                string.Format(inv, "HOLES: \u00d8{0} mm, drilled through the side face, centred in the {1:0} mm thickness.", c.BoltD, c.T),
                 "Hole positions are measured along the OUTER face (away from the centre) from the bottom long point.",
                 "'square' = perpendicular to the board. 'drilled level' = horizontal with the tree standing (apex bolts).",
                 "Left parts are mirror images of the right: same numbers.",
                 "Drill each lap through both boards together, clamped in place, to keep the holes aligned.",
                 string.Format(inv, "BASE: bottom uprights stand on the rail, rail sits on the feet. Clamp each leg in place and drill a Ø4.5 pilot {0:0} mm", c.BaseScrewDepth),
                 string.Format(inv, "up through the rail hole into the leg end grain. Fix with an M6 x {0:0} coach screw up through foot + rail into the leg.",
-                    Math.Ceiling((2 * c.W + c.BaseScrewDepth) / 10) * 10 - 10) });
+                    Math.Ceiling((c.W + Math.Min(c.W, c.T) + c.BaseScrewDepth) / 10) * 10 - 10),
+                string.Format(inv, "BOLTS (M6): laps M6 x {0:0}; apex M6 x {1:0} at 90 and M6 x {2:0} at 140 below the tip (or threaded rod cut to suit).",
+                    BoltLen(2 * c.W), BoltLen(2 * 90 * Math.Tan(c.PhiDeg * Math.PI / 180)), BoltLen(2 * 140 * Math.Tan(c.PhiDeg * Math.PI / 180))) });
             var note = (Note)dm.InsertNote(notes);
             if (note != null)
             {
@@ -874,6 +879,9 @@ namespace PineTree
             else
                 Console.WriteLine("PDF export failed (error " + err + "). Use File > Save As > PDF on the drawing.");
         }
+
+        // Bolt length for a grip of `wood` mm: add 20 for washers and nut, round up to 10.
+        static double BoltLen(double wood) { return Math.Ceiling((wood + 20) / 10) * 10; }
 
         static void SaveDoc(ModelDoc2 m, string path)
         {

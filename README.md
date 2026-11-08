@@ -75,7 +75,10 @@ Options (mm):
   `--RailOverhang` (20) in from each end, and the rail sits on the two feet. The upright slope is worked out from height and base.
 - `--BaseScrewDepth 50`: how far the M6 coach screw (up through foot + rail) goes into each leg's end grain
 - `--L1`, `--L3`: vertical extent of the top / bottom upright (default scales with height, 470 at 1210); the middle one takes the rest
-- also `--W`, `--Overlap`, `--FootL`, `--BoltD`, `--StarR`, `--CapNeckH`, `--CapPlateT`, `--StockLen`
+- `--W 42`, `--T 42`: timber size. `W` is the width seen from the front (in the plane of the tree, also the rail height),
+  `T` the thickness front to back. 90x45 on edge (deep front to back): `--W 45 --T 90`. Feet lie wide face down.
+  The star neck thickness follows `T`, so `stl/star_cap.stl` (42 thick) won't fit other thicknesses.
+- also `--Overlap`, `--FootL`, `--BoltD`, `--StarR`, `--CapNeckH`, `--CapPlateT`, `--StockLen`
 - `--preview`: print the slope, cut list and bolt positions, check the sizes, and stop without touching SOLIDWORKS
 
 Example: `TreeBuilder.exe D:\Projects\christmas-tree\out --height 1500 --base 750`
