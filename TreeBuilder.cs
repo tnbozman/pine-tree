@@ -1,0 +1,604 @@
+// TreeBuilder.cs - builds the flat stepped pine Christmas tree in SOLIDWORKS as individual
+// parts (.SLDPRT) plus one assembly (.SLDASM).
+//
+// Design: ONE flat plane of 42x42 pine. Each side has three parallel uprights. They overlap
+// 130 mm with their long faces touching (no wood cuts into other wood). Each lower upright
+// under-laps the one above: the top upright (P1) is on the outer line, the middle (P2) one
+// board-width inside it, the bottom (P3) one more inside. All lap ends are cut horizontal.
+// Lap bolts run IN the plane, perpendicular to the boards (outer to inner), never front-to-back.
+// The two top uprights meet at the apex and are bolted across it; a printed star cap clamps the tip.
+//
+// Build: .NET Framework 4.8 console app, x64, references SolidWorks.Interop.sldworks.dll and
+// SolidWorks.Interop.swconst.dll (see TreeBuilder.csproj). Run with SOLIDWORKS installed.
+// Usage: start SOLIDWORKS first (from 3DEXPERIENCE), then
+//        TreeBuilder.exe [outputFolder] [--height mm] [--base mm] [--<any Cfg field> value] [--preview]
+//        (default folder: Documents\PineTree; see class Cfg for every parameter)
+//
+// Units: mm here, metres in the API (x MM). Each part is modelled in its final assembly position:
+// profile sketched on the Front plane and extruded symmetrically about it (mid-plane), so every
+// bolt axis lies in the Front plane. Bolt holes are revolve-cuts about a centre line in that
+// plane, which gives round holes at any angle. Components are inserted and fixed - no mates.
+// Not compiled or tested here: if a call fails, the README has hand-build tables.
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
+
+namespace PineTree
+{
+    // All sizes in mm. Every field can be overridden on the command line: --Name value (or --Name=value),
+    // case-insensitive, plus the aliases --height (H) and --base (BaseWidth). Example:
+    //   TreeBuilder.exe D:\out --height 1500 --base 750
+    class Cfg
+    {
+        public double H = 1210;         // apex height: tip of the wood, measured from the floor (underside of rail)
+        public double BaseWidth = 610;  // outside-to-outside width of the bottom uprights at the floor
+        public double W = 42;           // square section of the pine
+        public double Overlap = 130;    // vertical overlap of each lap
+        public double L3 = 0;           // vertical extent of bottom upright; 0 = auto (470 at H 1210, scales with H)
+        public double L1 = 0;           // vertical extent of top upright; 0 = auto (same rule). Middle one takes the rest.
+        public double FootL = 450;      // foot length (front to back)
+        public double BoltD = 6.5;      // clearance hole for M6 rod / bolt
+        public double CapNeckH = 42;    // printed cap neck thickness (front to back)
+        public double CapPlateT = 12;   // printed star plate thickness
+        public double StarR = 85;       // star outer radius
+        public double StockLen = 1800;  // length of the pine you buy (only used for a warning)
+
+        // Derived: slope of the uprights from vertical, solved so the base comes out at BaseWidth.
+        public double PhiDeg;
+        // --preview: print the parameters and cut list, check them, and stop before SOLIDWORKS.
+        public bool Preview;
+
+        static readonly Dictionary<string, string> Alias = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            { { "height", "H" }, { "base", "BaseWidth" }, { "width", "BaseWidth" } };
+
+        // Returns the output folder (first argument that is not an option) or null.
+        public string Parse(string[] args)
+        {
+            string dir = null;
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i];
+                if (!a.StartsWith("--")) { dir = a; continue; }
+                if (a.Equals("--preview", StringComparison.OrdinalIgnoreCase)) { Preview = true; continue; }
+                string name = a.Substring(2), val;
+                int eq = name.IndexOf('=');
+                if (eq >= 0) { val = name.Substring(eq + 1); name = name.Substring(0, eq); }
+                else if (i + 1 < args.Length) val = args[++i];
+                else throw new ArgumentException("No value given for " + a);
+                string mapped;
+                if (Alias.TryGetValue(name, out mapped)) name = mapped;
+                var f = typeof(Cfg).GetField(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance
+                                                   | System.Reflection.BindingFlags.IgnoreCase);
+                if (f == null || f.Name == "PhiDeg" || f.FieldType != typeof(double))
+                    throw new ArgumentException("Unknown option " + a + ". Options: --height, --base, " +
+                        string.Join(", ", typeof(Cfg).GetFields().Where(x => x.Name != "PhiDeg" && x.FieldType == typeof(double)).Select(x => "--" + x.Name)));
+                f.SetValue(this, double.Parse(val, System.Globalization.CultureInfo.InvariantCulture));
+            }
+            return dir;
+        }
+
+        // Half base = H tan(phi) - 2 W / cos(phi)  (outer line, two board-widths in for the bottom upright).
+        public void Solve()
+        {
+            if (L3 <= 0) L3 = Math.Round(H * 470 / 1210);
+            if (L1 <= 0) L1 = Math.Round(H * 470 / 1210);
+            Func<double, double> half = p => H * Math.Tan(p) - 2 * W / Math.Cos(p);
+            double lo = 0.001, hi = 50 * Math.PI / 180;
+            if (half(hi) < BaseWidth / 2) throw new ArgumentException("Base is too wide for this height (slope over 50 degrees).");
+            if (half(lo) > BaseWidth / 2) throw new ArgumentException("Base is too narrow for this height.");
+            for (int i = 0; i < 100; i++) { double m = (lo + hi) / 2; if (half(m) < BaseWidth / 2) lo = m; else hi = m; }
+            PhiDeg = (lo + hi) / 2 * 180 / Math.PI;
+        }
+
+        public void Print()
+        {
+            Console.WriteLine("Parameters (mm): " + string.Join("  ", typeof(Cfg).GetFields()
+                .Where(f => f.Name != "PhiDeg" && f.FieldType == typeof(double)).Select(f => f.Name + "=" + ((double)f.GetValue(this)).ToString("0.###"))));
+            Console.WriteLine("Upright slope: {0:F2} deg from vertical (saw: lap ends {0:F1} deg, P1 tip {1:F1} deg)",
+                PhiDeg, 90 - PhiDeg);
+        }
+    }
+
+    class Bolt
+    {
+        public double X, Y, Dx, Dy, Len;
+        public Bolt(double x, double y, double dx, double dy, double len) { X = x; Y = y; Dx = dx; Dy = dy; Len = len; }
+    }
+
+    class PartDef
+    {
+        public string Name = "", Stock = "";
+        public List<double[]> Pts = new List<double[]>();
+        public List<Bolt> Bolts = new List<Bolt>();
+        public List<List<double[]>> Cuts = new List<List<double[]>>();   // outlines cut through the part
+        public double Depth;                 // total thickness (Z), centred on the Front plane
+        public double[] Axis = { 1, 0 };     // board axis, used for cut-list length
+        public double[] Xs = { 0 };          // X offsets of instances in the assembly
+        public bool Printed { get { return Stock.StartsWith("PETG"); } }
+    }
+
+    static class Program
+    {
+        const double MM = 0.001;
+        static double BoltD = 6.5;
+
+        [STAThread]
+        static int Main(string[] args)
+        {
+            try
+            {
+                var cfg = new Cfg();
+                string dir = cfg.Parse(args)
+                    ?? Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "PineTree");
+                cfg.Solve();
+                cfg.Print();
+                if (!cfg.Preview) Directory.CreateDirectory(dir);
+
+                List<PartDef> parts = BuildParts(cfg);
+                PrintCutList(parts);
+                if (!CheckParts(cfg, parts)) return 3;
+                if (cfg.Preview) { Console.WriteLine("Preview only: nothing built."); return 0; }
+                BoltD = cfg.BoltD;
+
+                SldWorks app = ConnectToSolidWorks();
+                if (app == null) { Console.WriteLine("Could not connect to SOLIDWORKS."); return 1; }
+
+                // While we draw: no "enter dimension" pop-ups, no inference, no automatic relations and
+                // no auto-rotate to face each new sketch. Restored afterwards.
+                var toggles = new[] {
+                    swUserPreferenceToggle_e.swInputDimValOnCreate, swUserPreferenceToggle_e.swSketchInference,
+                    swUserPreferenceToggle_e.swSketchAutomaticRelations, swUserPreferenceToggle_e.swAutoNormalToSketchMode };
+                var was = toggles.ToDictionary(t => t, t => app.GetUserPreferenceToggle((int)t));
+                foreach (var t in toggles) app.SetUserPreferenceToggle((int)t, false);
+                app.CommandInProgress = true;   // tells SOLIDWORKS a program is driving it: fewer UI updates
+                CloseDocsIn(app, dir);           // a previous run's files may still be open; we overwrite them
+                try
+                {
+                    var paths = new Dictionary<string, string>();
+                    var zmin = new Dictionary<string, double>();
+                    foreach (PartDef d in parts)
+                    {
+                        double z;
+                        paths[d.Name] = MakePart(app, d, dir, out z);
+                        zmin[d.Name] = z;
+                        Console.WriteLine("Saved " + paths[d.Name]);
+                    }
+                    MakeAssembly(app, parts, paths, zmin, dir);
+                }
+                finally
+                {
+                    try
+                    {
+                        app.CommandInProgress = false;
+                        foreach (var t in toggles) app.SetUserPreferenceToggle((int)t, was[t]);
+                    }
+                    catch (Exception) { /* SOLIDWORKS already gone */ }
+                }
+                Console.WriteLine("Done. Evaluate > Interference Detection: expect none (laps only touch).");
+                return 0;
+            }
+            catch (ArgumentException ex)
+            {
+                Console.WriteLine("Bad parameters: " + ex.Message);
+                return 3;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("FAILED: " + ex);
+                return 2;
+            }
+        }
+
+        // Attach to a SOLIDWORKS that is already running. With 3DEXPERIENCE SOLIDWORKS a copy started
+        // over COM has no platform login/licence and quits after a few seconds ("RPC server is
+        // unavailable"), so we never start one ourselves: start it from the 3DEXPERIENCE launcher /
+        // compass, and this waits (up to 10 min) until it appears and has finished loading.
+        static SldWorks ConnectToSolidWorks()
+        {
+            if (Type.GetTypeFromProgID("SldWorks.Application") == null)
+            { Console.WriteLine("SOLIDWORKS is not registered on this PC."); return null; }
+
+            SldWorks app = null;
+            bool told = false;
+            for (int i = 0; i < 600 && app == null; i++)
+            {
+                try { app = (SldWorks)System.Runtime.InteropServices.Marshal.GetActiveObject("SldWorks.Application"); }
+                catch (Exception)
+                {
+                    if (!told)
+                    {
+                        Console.WriteLine("No running SOLIDWORKS found. Start it from 3DEXPERIENCE (log in, open SOLIDWORKS)");
+                        Console.WriteLine("and leave it open. Run this from a terminal that is NOT 'Run as administrator'");
+                        Console.WriteLine("unless SOLIDWORKS is too. Waiting...");
+                        told = true;
+                    }
+                    System.Threading.Thread.Sleep(1000);
+                }
+            }
+            if (app == null) return null;
+
+            Console.Write("Attached to SOLIDWORKS, waiting for it to finish loading");
+            for (int i = 0; i < 300; i++)
+            {
+                try { if (app.StartupProcessCompleted) break; } catch (Exception) { }
+                System.Threading.Thread.Sleep(1000);
+                Console.Write(".");
+            }
+            Console.WriteLine();
+            app.Visible = true;
+            return app;
+        }
+
+        static double[] P(double x, double y) { return new[] { x, y }; }
+        static List<double[]> Mirror(List<double[]> pts) { return pts.Select(p => new[] { -p[0], p[1] }).ToList(); }
+        static List<Bolt> Mirror(List<Bolt> b) { return b.Select(k => new Bolt(-k.X, k.Y, -k.Dx, k.Dy, k.Len)).ToList(); }
+
+        static List<PartDef> BuildParts(Cfg c)
+        {
+            double phi = c.PhiDeg * Math.PI / 180.0;
+            double tan = Math.Tan(phi), cos = Math.Cos(phi), sin = Math.Sin(phi);
+            double a = c.W / cos;                               // horizontal width of an upright
+            // outer edge x of the upright k board-widths in from the outer line, at height y
+            Func<double, int, double> xo = (y, k) => (c.H - y) * tan - k * a;
+
+            double ha = c.H;                                    // apex height (top uprights meet at x = 0)
+            double ym = ha - c.W / sin;                         // where their inner edges meet the centre line
+            double y2lo = c.L3 - c.Overlap;                     // middle upright spans y2lo .. y2hi
+            double y1lo = ha - c.L1;
+            double y2hi = y1lo + c.Overlap;
+
+            const string stock = "42x42 DAR pine";
+            const string printed = "PETG print";
+            double[] axisR = { sin, -cos }, axisL = { -sin, -cos };
+            var list = new List<PartDef>();
+
+            Func<int, double, double, List<double[]>> board = (k, ya, yb) => new List<double[]> {
+                P(xo(yb, k), yb), P(xo(ya, k), ya), P(xo(ya, k) - a, ya), P(xo(yb, k) - a, yb) };
+
+            // lap bolts: centred on the shared face, perpendicular to the uprights (outward = (cos, sin))
+            var lapLow = new List<Bolt>(); var lapHigh = new List<Bolt>();
+            double lapLen = 3 * c.W;                            // hole runs right through both boards
+            foreach (double y in new[] { y2lo + 30, c.L3 - 30 }) lapLow.Add(new Bolt(xo(y, 2), y, cos, sin, lapLen));
+            foreach (double y in new[] { y1lo + 30, y2hi - 30 }) lapHigh.Add(new Bolt(xo(y, 1), y, cos, sin, lapLen));
+
+            // apex: 2 cross bolts through both top uprights, 2 more through the printed cap neck
+            var apex = new List<Bolt>();
+            foreach (double dy in new[] { 40.0, 62.0, 90.0, 140.0 })
+                apex.Add(new Bolt(0, ha - dy, 1, 0, 2 * (dy * tan + 20)));
+
+            // P3: bottom upright, two boards in (under-laps P2). Horizontal (18 deg) end cuts.
+            var p3 = board(2, 0, c.L3);
+            list.Add(new PartDef { Name = "P3R", Stock = stock, Pts = p3, Bolts = lapLow, Depth = c.W, Axis = axisR });
+            list.Add(new PartDef { Name = "P3L", Stock = stock, Pts = Mirror(p3), Bolts = Mirror(lapLow), Depth = c.W, Axis = axisL });
+
+            // P2: middle upright, one board in; over P3 (low), under P1 (high)
+            var p2 = board(1, y2lo, y2hi);
+            var b2 = lapLow.Concat(lapHigh).ToList();
+            list.Add(new PartDef { Name = "P2R", Stock = stock, Pts = p2, Bolts = b2, Depth = c.W, Axis = axisR });
+            list.Add(new PartDef { Name = "P2L", Stock = stock, Pts = Mirror(p2), Bolts = Mirror(b2), Depth = c.W, Axis = axisL });
+
+            // P1: top upright, on the outer line, over P2; tip is cut vertically at x = 0 (72 deg from square)
+            var p1 = new List<double[]> { P(0, ha), P(xo(y1lo, 0), y1lo), P(xo(y1lo, 0) - a, y1lo), P(0, ym) };
+            var b1 = lapHigh.Concat(apex).ToList();
+            list.Add(new PartDef { Name = "P1R", Stock = stock, Pts = p1, Bolts = b1, Depth = c.W, Axis = axisR });
+            list.Add(new PartDef { Name = "P1L", Stock = stock, Pts = Mirror(p1), Bolts = Mirror(b1), Depth = c.W, Axis = axisL });
+
+            // Rail between the legs (ends cut parallel to the leg inner edge). Fixed with a coach screw
+            // through each leg into the rail end grain (pilot holes drilled by hand).
+            list.Add(new PartDef
+            {
+                Name = "RAIL", Stock = stock, Depth = c.W,
+                Pts = new List<double[]> { P(-xo(0, 3), 0), P(xo(0, 3), 0), P(xo(c.W, 3), c.W), P(-xo(c.W, 3), c.W) }
+            });
+
+            // Foot: 42x42, runs front to back under each leg. One part, two instances.
+            double fx = xo(0, 2) - a / 2;
+            list.Add(new PartDef
+            {
+                Name = "FOOT", Stock = stock, Depth = c.FootL, Xs = new[] { -fx, fx },
+                Pts = new List<double[]> { P(-c.W / 2, -c.W), P(c.W / 2, -c.W), P(c.W / 2, 0), P(-c.W / 2, 0) }
+            });
+
+            // ---- printed star cap (same rules as geometry_check.py) ----
+            // Neck: block from 72 below to 8 above the apex, with a V slot (2 x slope, 0.4 mm clearance)
+            // the two top tips sit in. It widens if the slope gets steeper, keeping 10 mm of wall.
+            double clr = 0.4, ytip = ha + clr / sin, yb = ha - 72, yt = ha + 8;
+            double nh = Math.Max(34, Math.Ceiling((ytip - yb) * tan + 10));
+            double sx = (ytip - (yb - 1)) * tan;
+            var capBolts = new List<Bolt> { new Bolt(0, ha - 40, 1, 0, 2 * nh + 20), new Bolt(0, ha - 62, 1, 0, 2 * nh + 20) };
+            list.Add(new PartDef
+            {
+                Name = "STAR_NECK", Stock = printed, Depth = c.CapNeckH, Bolts = capBolts,
+                Pts = Rect(-nh, yb, nh, yt),
+                Cuts = { new List<double[]> { P(-sx, yb - 1), P(0, ytip), P(sx, yb - 1) } }
+            });
+            // Plate: 5-point star centred 45 above the apex, minus the neck block (they touch, no overlap).
+            double yc = ha + 45, ri = 0.4 * c.StarR;
+            var star = Enumerable.Range(0, 10).Select(k =>
+            {
+                double r = k % 2 == 0 ? c.StarR : ri, ang = (90 + 36 * k) * Math.PI / 180;
+                return P(r * Math.Cos(ang), yc + r * Math.Sin(ang));
+            }).ToList();
+            list.Add(new PartDef
+            {
+                Name = "STAR_PLATE", Stock = printed, Depth = c.CapPlateT,
+                Pts = star,
+                Cuts = { Rect(-nh, yb - 1, nh, yt) }
+            });
+            return list;
+        }
+
+        static List<double[]> Rect(double x0, double y0, double x1, double y1)
+        { return new List<double[]> { P(x0, y0), P(x1, y0), P(x1, y1), P(x0, y1) }; }
+
+        // Sanity checks on the derived geometry. Returns false (and says why) if the tree won't go together.
+        static bool CheckParts(Cfg c, List<PartDef> parts)
+        {
+            double phi = c.PhiDeg * Math.PI / 180, ok = 1;
+            Action<bool, string> need = (cond, msg) => { if (!cond) { Console.WriteLine("PROBLEM: " + msg); ok = 0; } };
+            double y2lo = c.L3 - c.Overlap, y1lo = c.H - c.L1, y2hi = y1lo + c.Overlap;
+            need(c.Overlap >= 80, "Overlap must be at least 80 mm (two lap bolts 30 mm from each end).");
+            need(y1lo - c.L3 >= 20, string.Format(
+                "Height {0} is too small for L1 {1} + L3 {2}: the two laps on the middle upright would meet. " +
+                "Lower --L1/--L3 or raise --height.", c.H, c.L1, c.L3));
+            need(c.L1 > c.W / Math.Sin(phi) + 150, string.Format(
+                "L1 {0} is too short: the top upright needs at least {1:F0} mm for the apex bolts.", c.L1, c.W / Math.Sin(phi) + 150));
+            need(c.H * Math.Tan(phi) - 3 * c.W / Math.Cos(phi) > 50, "Base is too narrow: no room for the rail between the legs.");
+            need(c.PhiDeg <= 30, "Slope over 30 degrees: the star cap and the tip mitre get impractical. Narrow the base.");
+            foreach (var d in parts.Where(p => !p.Printed && p.Name != "FOOT"))
+            {
+                var dots = d.Pts.Select(p => p[0] * d.Axis[0] + p[1] * d.Axis[1]).ToList();
+                double len = d.Name == "RAIL" ? d.Pts.Max(p => p[0]) - d.Pts.Min(p => p[0]) : dots.Max() - dots.Min();
+                if (len > c.StockLen - 10)
+                    Console.WriteLine("WARNING: {0} is {1:F0} mm, longer than the {2:F0} mm stock (--StockLen).", d.Name, len, c.StockLen);
+            }
+            if (ok == 0) Console.WriteLine("Nothing was built. Change the parameters and run again.");
+            return ok == 1;
+        }
+
+        static void PrintCutList(List<PartDef> parts)
+        {
+            Console.WriteLine("Part       Stock             Stock length (mm)  x  bolt holes");
+            foreach (PartDef d in parts)
+            {
+                if (d.Printed) continue;
+                double len;
+                if (d.Name == "FOOT") len = d.Depth;
+                else if (d.Name == "RAIL") len = d.Pts.Max(p => p[0]) - d.Pts.Min(p => p[0]);
+                else
+                {
+                    var dots = d.Pts.Select(p => p[0] * d.Axis[0] + p[1] * d.Axis[1]).ToList();
+                    len = dots.Max() - dots.Min();
+                }
+                Console.WriteLine("{0,-10} {1,-17} {2,8:F1}   x{3}   bolts: {4}", d.Name, d.Stock, len, d.Xs.Length,
+                    string.Join(" ", d.Bolts.Select(b => string.Format("({0:F1},{1:F1})", b.X, b.Y))));
+            }
+            Console.WriteLine("Printed PETG: STAR_NECK + STAR_PLATE (one piece in star_cap.stl)");
+        }
+
+        // ------------------------------------------------------------ SOLIDWORKS
+        static string MakePart(SldWorks app, PartDef d, string dir, out double zminMm)
+        {
+            string tpl = app.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swDefaultTemplatePart);
+            app.NewDocument(tpl, 0, 0, 0);
+            var m = (ModelDoc2)app.ActiveDoc;
+            if (m == null)
+                throw new Exception("Could not create a part. Set Tools > Options > Default Templates > Part.");
+
+            Console.WriteLine("  " + d.Name + ": new part created");
+            // Write sketch entities straight to the database: no snapping/inference and no live
+            // redraw per line. Driving those from out of process is a common cause of crashes.
+            m.SketchManager.AddToDB = true;
+            m.SketchManager.DisplayWhenAdded = false;
+            var view = m.ActiveView as ModelView;
+            if (view != null) view.EnableGraphicsUpdate = false;   // no redraws while the part is built
+            // Profile on the Front plane, extruded symmetrically (mid-plane) so z = -Depth/2 .. +Depth/2.
+            string sk = OpenSketchOnFront(m);
+            Console.WriteLine("  " + d.Name + ": " + sk + " open, drawing outline");
+            DrawLoop(m, d.Pts);
+            CloseAndSelectSketch(m, sk);
+            Console.WriteLine("  " + d.Name + ": outline done, extruding");
+
+            Feature ext = m.FeatureManager.FeatureExtrusion2(
+                true, false, false, (int)swEndConditions_e.swEndCondMidPlane, 0,
+                d.Depth * MM, 0, false, false, false, false, 0, 0,
+                false, false, false, false, true, true, true, 0, 0, false);
+            if (ext == null) throw new Exception("Extrude failed for " + d.Name);
+
+            // Outline cuts (star cap slot / notch): sketched on the Front plane, cut mid-plane right through.
+            foreach (var cut in d.Cuts)
+            {
+                string cs = OpenSketchOnFront(m);
+                Console.WriteLine("  " + d.Name + ": " + cs + " cut");
+                DrawLoop(m, cut);
+                CloseAndSelectSketch(m, cs);
+                Feature cf = m.FeatureManager.FeatureCut4(
+                    true, false, false, (int)swEndConditions_e.swEndCondMidPlane, 0,
+                    4 * d.Depth * MM, 0, false, false, false, false, 0, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    0, 0, false, false);
+                if (cf == null) throw new Exception("Outline cut failed in " + d.Name);
+            }
+
+            for (int i = 0; i < d.Bolts.Count; i++)
+            {
+                Console.WriteLine("  " + d.Name + ": bolt hole " + (i + 1) + "/" + d.Bolts.Count);
+                CutBolt(m, d.Bolts[i], d.Name);
+            }
+            if (view != null) view.EnableGraphicsUpdate = true;
+
+            double[] box = (double[])((PartDoc)m).GetPartBox(true);
+            zminMm = box[2] / MM;
+
+            CustomPropertyManager cpm = m.Extension.CustomPropertyManager[""];
+            cpm.Add3("Stock", (int)swCustomInfoType_e.swCustomInfoText, d.Stock,
+                     (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+
+            string path = Path.Combine(dir, d.Name + ".SLDPRT");
+            m.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
+            app.CloseDoc(m.GetTitle());
+            return path;
+        }
+
+        // Round hole along any in-plane direction: revolve a thin rectangle 360 deg about its centre line.
+        static void CutBolt(ModelDoc2 m, Bolt b, string name)
+        {
+            double r = BoltD / 2, dl = Math.Sqrt(b.Dx * b.Dx + b.Dy * b.Dy);
+            double ux = b.Dx / dl, uy = b.Dy / dl, nx = -uy, ny = ux;
+            double ax = b.X - ux * b.Len / 2, ay = b.Y - uy * b.Len / 2;
+            double bx = b.X + ux * b.Len / 2, by = b.Y + uy * b.Len / 2;
+
+            string sk = OpenSketchOnFront(m);
+            Console.WriteLine("    " + sk + ": axis");
+            SM(m).CreateCenterLine(ax * MM, ay * MM, 0, bx * MM, by * MM, 0);
+            Console.WriteLine("    " + sk + ": profile");
+            var rect = new List<double[]> { P(ax, ay), P(bx, by), P(bx + nx * r, by + ny * r), P(ax + nx * r, ay + ny * r) };
+            DrawLoop(m, rect);
+            CloseAndSelectSketch(m, sk);
+            Console.WriteLine("    " + sk + ": revolve cut");
+            Feature rev = m.FeatureManager.FeatureRevolve2(
+                true, true, false, true, false, false,
+                (int)swEndConditions_e.swEndCondBlind, 0, 2 * Math.PI, 0,
+                false, false, 0, 0, 0, 0, 0, true, true, true);
+            if (rev == null) throw new Exception("Bolt hole cut failed in " + name);
+        }
+
+        static SketchManager SM(ModelDoc2 m) { return m.SketchManager; }
+
+        // Open a sketch on the Front plane and return its name (e.g. "Sketch3").
+        static string OpenSketchOnFront(ModelDoc2 m)
+        {
+            SelectFront(m);
+            SM(m).InsertSketch(true);
+            var f = SM(m).ActiveSketch as Feature;
+            if (f == null) throw new Exception("Could not open a sketch on the Front plane.");
+            return f.Name;
+        }
+
+        // Close the active sketch and select it by name, ready for a feature.
+        static void CloseAndSelectSketch(ModelDoc2 m, string name)
+        {
+            SM(m).InsertSketch(true);
+            m.ClearSelection2(true);
+            if (!m.Extension.SelectByID2(name, "SKETCH", 0, 0, 0, false, 0, null, 0))
+                SelectLast(m, "ProfileFeature");
+        }
+
+        static void DrawLoop(ModelDoc2 m, List<double[]> pts)
+        {
+            SketchManager sm = m.SketchManager;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                double[] p = pts[i], q = pts[(i + 1) % pts.Count];
+                sm.CreateLine(p[0] * MM, p[1] * MM, 0, q[0] * MM, q[1] * MM, 0);
+            }
+        }
+
+        // The Front plane: try its usual names, then fall back to the first reference plane in the tree.
+        static void SelectFront(ModelDoc2 m)
+        {
+            foreach (string n in new[] { "Front Plane", "Front", "Plane1" })
+                if (m.Extension.SelectByID2(n, "PLANE", 0, 0, 0, false, 0, null, 0)) return;
+            SelectFirst(m, "RefPlane", false);
+        }
+
+        static void SelectFirst(ModelDoc2 m, string typeName, bool append)
+        {
+            Feature f = (Feature)m.FirstFeature();
+            while (f != null)
+            {
+                if (f.GetTypeName2() == typeName) { f.Select2(append, 0); return; }
+                f = (Feature)f.GetNextFeature();
+            }
+            throw new Exception("Feature type not found: " + typeName);
+        }
+
+        static void SelectLast(ModelDoc2 m, string typeName)
+        {
+            Feature hit = null, f = (Feature)m.FirstFeature();
+            while (f != null)
+            {
+                if (f.GetTypeName2() == typeName) hit = f;
+                f = (Feature)f.GetNextFeature();
+            }
+            if (hit == null) throw new Exception("Feature type not found: " + typeName);
+            hit.Select2(false, 0);
+        }
+
+        static void MakeAssembly(SldWorks app, List<PartDef> parts, Dictionary<string, string> paths,
+                                 Dictionary<string, double> zmin, string dir)
+        {
+            // AddComponent5 only inserts parts that are already open, so open them all (silently) first.
+            foreach (PartDef d in parts)
+            {
+                int err = 0, warn = 0;
+                var doc = app.OpenDoc6(paths[d.Name], (int)swDocumentTypes_e.swDocPART,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref err, ref warn);
+                if (doc == null) throw new Exception("Could not open " + paths[d.Name] + " (error " + err + ")");
+            }
+            Console.WriteLine("Building assembly");
+
+            string tpl = app.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swDefaultTemplateAssembly);
+            var am = (ModelDoc2)app.NewDocument(tpl, 0, 0, 0);
+            if (am == null)
+                throw new Exception("Could not create an assembly. Set Tools > Options > Default Templates > Assembly.");
+            var asm = (AssemblyDoc)am;
+            var mu = (MathUtility)app.GetMathUtility();
+
+            foreach (PartDef d in parts)
+            {
+                foreach (double x in d.Xs)
+                {
+                    // AddComponent5 puts the part's bounding-box centre at the given point, but each part is
+                    // already modelled in its final position. So insert it anywhere, then set its transform
+                    // explicitly: no rotation, shifted only by its X offset (the second foot).
+                    Component2 comp = asm.AddComponent5(paths[d.Name],
+                        (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
+                        "", false, "", 0, 0, 0);
+                    if (comp == null) throw new Exception("Could not insert " + d.Name);
+                    var xf = (MathTransform)mu.CreateTransform(new double[] {
+                        1, 0, 0,  0, 1, 0,  0, 0, 1,     // rotation (identity)
+                        x * MM, 0, 0,                    // translation
+                        1,  0, 0, 0 });                  // scale, unused
+                    comp.Transform2 = xf;
+                    comp.Select4(false, null, false);
+                    asm.FixComponent();
+                    am.ClearSelection2(true);
+                }
+            }
+            am.EditRebuild3();
+            foreach (Component2 c in (object[])asm.GetComponents(true))
+            {
+                double[] t = (double[])((MathTransform)c.Transform2).ArrayData;
+                Console.WriteLine("  {0,-14} at ({1:F1}, {2:F1}, {3:F1}) mm", c.Name2, t[9] / MM, t[10] / MM, t[11] / MM);
+            }
+            am.ShowNamedView2("*Front", (int)swStandardViews_e.swFrontView);
+            am.ViewZoomtofit2();
+            SaveDoc(am, Path.Combine(dir, "PineTree.SLDASM"));
+        }
+
+        // Close open documents saved in the output folder (assemblies first, so parts are released).
+        static void CloseDocsIn(SldWorks app, string dir)
+        {
+            string full = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
+            var docs = ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>()
+                .Where(d => d.GetPathName().StartsWith(full, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(d => d.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY ? 0 : 1).ToList();
+            foreach (ModelDoc2 d in docs)
+            {
+                Console.WriteLine("Closing open " + Path.GetFileName(d.GetPathName()));
+                app.CloseDoc(d.GetTitle());
+            }
+        }
+
+        static void SaveDoc(ModelDoc2 m, string path)
+        {
+            m.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
+            Console.WriteLine("Saved " + path);
+        }
+    }
+}
