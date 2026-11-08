@@ -71,7 +71,9 @@ Hole positions are measured along the board's outer face (away from the centre o
 
 Options (mm):
 - `--height 1210`: tip of the wood above the floor
-- `--base 610`: outside width of the legs at the floor. The upright slope is worked out from height and base.
+- `--base 622`: length of the base rail (overall width of the base). The bottom uprights stand on the rail,
+  `--RailOverhang` (20) in from each end, and the rail sits on the two feet. The upright slope is worked out from height and base.
+- `--BaseScrewDepth 50`: how far the M6 coach screw (up through foot + rail) goes into each leg's end grain
 - `--L1`, `--L3`: vertical extent of the top / bottom upright (default scales with height, 470 at 1210); the middle one takes the rest
 - also `--W`, `--Overlap`, `--FootL`, `--BoltD`, `--StarR`, `--CapNeckH`, `--CapPlateT`, `--StockLen`
 - `--preview`: print the slope, cut list and bolt positions, check the sizes, and stop without touching SOLIDWORKS

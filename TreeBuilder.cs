@@ -34,8 +34,10 @@ namespace PineTree
     //   TreeBuilder.exe D:\out --height 1500 --base 750
     class Cfg
     {
-        public double H = 1210;         // apex height: tip of the wood, measured from the floor (underside of rail)
-        public double BaseWidth = 610;  // outside-to-outside width of the bottom uprights at the floor
+        public double H = 1210;         // apex height: tip of the wood above the underside of the rail (top of the feet)
+        public double BaseWidth = 622;  // length of the base rail = overall width of the base
+        public double RailOverhang = 20;    // rail sticks out this far past the outside of each leg
+        public double BaseScrewDepth = 50;  // how far the base coach screw goes into the leg end grain
         public double W = 42;           // square section of the pine
         public double Overlap = 130;    // vertical overlap of each lap
         public double L3 = 0;           // vertical extent of bottom upright; 0 = auto (470 at H 1210, scales with H)
@@ -81,16 +83,18 @@ namespace PineTree
             return dir;
         }
 
-        // Half base = H tan(phi) - 2 W / cos(phi)  (outer line, two board-widths in for the bottom upright).
+        // The outside of the bottom upright where it sits on the rail (y = W) is RailOverhang in from the
+        // rail end: (H - W) tan(phi) - 2 W / cos(phi) = BaseWidth / 2 - RailOverhang.
         public void Solve()
         {
             if (L3 <= 0) L3 = Math.Round(H * 470 / 1210);
             if (L1 <= 0) L1 = Math.Round(H * 470 / 1210);
-            Func<double, double> half = p => H * Math.Tan(p) - 2 * W / Math.Cos(p);
+            double target = BaseWidth / 2 - RailOverhang;
+            Func<double, double> half = p => (H - W) * Math.Tan(p) - 2 * W / Math.Cos(p);
             double lo = 0.001, hi = 50 * Math.PI / 180;
-            if (half(hi) < BaseWidth / 2) throw new ArgumentException("Base is too wide for this height (slope over 50 degrees).");
-            if (half(lo) > BaseWidth / 2) throw new ArgumentException("Base is too narrow for this height.");
-            for (int i = 0; i < 100; i++) { double m = (lo + hi) / 2; if (half(m) < BaseWidth / 2) lo = m; else hi = m; }
+            if (half(hi) < target) throw new ArgumentException("Base is too wide for this height (slope over 50 degrees).");
+            if (half(lo) > target) throw new ArgumentException("Base is too narrow for this height.");
+            for (int i = 0; i < 100; i++) { double m = (lo + hi) / 2; if (half(m) < target) lo = m; else hi = m; }
             PhiDeg = (lo + hi) / 2 * 180 / Math.PI;
         }
 
@@ -159,6 +163,9 @@ namespace PineTree
                 foreach (var t in toggles) app.SetUserPreferenceToggle((int)t, false);
                 app.CommandInProgress = true;   // tells SOLIDWORKS a program is driving it: fewer UI updates
                 CloseDocsIn(app, dir);           // a previous run's files may still be open; we overwrite them
+                var openBefore = new HashSet<string>(((object[])app.GetDocuments() ?? new object[0])
+                    .Cast<ModelDoc2>().Select(d => d.GetTitle()));
+                bool built = false;
                 try
                 {
                     var paths = new Dictionary<string, string>();
@@ -168,16 +175,24 @@ namespace PineTree
                         double z;
                         paths[d.Name] = MakePart(app, d, dir, out z);
                         zmin[d.Name] = z;
-                        Console.WriteLine("Saved " + paths[d.Name]);
                     }
                     MakeAssembly(app, parts, paths, zmin, dir);
                     WriteCutListCsv(cfg, parts, Path.Combine(dir, "CutList.csv"));
                     MakeDrawing(app, cfg, Path.Combine(dir, "PineTree.SLDASM"), dir);
+                    built = true;
                 }
                 finally
                 {
                     try
                     {
+                        // On failure, close what this run opened, so half-built documents don't hold files locked.
+                        if (!built)
+                            foreach (var d in ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>()
+                                     .Where(d => !openBefore.Contains(d.GetTitle())).Select(d => d.GetTitle()).ToList())
+                            {
+                                Console.WriteLine("Closing " + d + " (left over from this failed run)");
+                                app.CloseDoc(d);
+                            }
                         app.CommandInProgress = false;
                         foreach (var t in toggles) app.SetUserPreferenceToggle((int)t, was[t]);
                     }
@@ -275,8 +290,8 @@ namespace PineTree
             foreach (double dy in new[] { 40.0, 62.0, 90.0, 140.0 })
                 apex.Add(new Bolt(0, ha - dy, 1, 0, 2 * (dy * tan + 20)));
 
-            // P3: bottom upright, two boards in (under-laps P2). Horizontal (18 deg) end cuts.
-            var p3 = board(2, 0, c.L3);
+            // P3: bottom upright, two boards in (under-laps P2), standing on the rail. Horizontal end cuts.
+            var p3 = board(2, c.W, c.L3);                       // stands on top of the rail
             list.Add(new PartDef { Name = "P3R", Stock = stock, Pts = p3, Bolts = lapLow, Depth = c.W, Axis = axisR });
             list.Add(new PartDef { Name = "P3L", Stock = stock, Pts = Mirror(p3), Bolts = Mirror(lapLow), Depth = c.W, Axis = axisL });
 
@@ -292,20 +307,26 @@ namespace PineTree
             list.Add(new PartDef { Name = "P1R", Stock = stock, Pts = p1, Bolts = b1, Depth = c.W, Axis = axisR });
             list.Add(new PartDef { Name = "P1L", Stock = stock, Pts = Mirror(p1), Bolts = Mirror(b1), Depth = c.W, Axis = axisL });
 
-            // Rail between the legs (ends cut parallel to the leg inner edge). Fixed with a coach screw
-            // through each leg into the rail end grain (pilot holes drilled by hand).
+            // Base: the rail runs the full width (y = 0 .. W, square ends) and the bottom uprights stand on it.
+            // The feet run front to back under the rail, one under each leg. Each side is held by one M6
+            // coach screw going up through the foot and the rail into the end grain of the leg. The screw
+            // is vertical while the leg leans, so it enters a little inside the leg centre and stays in the
+            // wood for BaseScrewDepth.
+            double sxr = xo(c.W, 2) - a / 2 - c.BaseScrewDepth / 2 * tan;
+            double railLen = 3 * c.W;
             list.Add(new PartDef
             {
                 Name = "RAIL", Stock = stock, Depth = c.W,
-                Pts = new List<double[]> { P(-xo(0, 3), 0), P(xo(0, 3), 0), P(xo(c.W, 3), c.W), P(-xo(c.W, 3), c.W) }
+                Pts = Rect(-c.BaseWidth / 2, 0, c.BaseWidth / 2, c.W),
+                Bolts = { new Bolt(-sxr, c.W / 2, 0, 1, railLen), new Bolt(sxr, c.W / 2, 0, 1, railLen) }
             });
 
-            // Foot: 42x42, runs front to back under each leg. One part, two instances.
-            double fx = xo(0, 2) - a / 2;
+            // Foot: 42x42, one part, two instances centred under the screws. Hole in the middle of its length.
             list.Add(new PartDef
             {
-                Name = "FOOT", Stock = stock, Depth = c.FootL, Xs = new[] { -fx, fx },
-                Pts = new List<double[]> { P(-c.W / 2, -c.W), P(c.W / 2, -c.W), P(c.W / 2, 0), P(-c.W / 2, 0) }
+                Name = "FOOT", Stock = stock, Depth = c.FootL, Xs = new[] { -sxr, sxr },
+                Pts = new List<double[]> { P(-c.W / 2, -c.W), P(c.W / 2, -c.W), P(c.W / 2, 0), P(-c.W / 2, 0) },
+                Bolts = { new Bolt(0, -c.W / 2, 0, 1, railLen) }
             });
 
             // ---- printed star cap (same rules as geometry_check.py) ----
@@ -372,14 +393,17 @@ namespace PineTree
                 d.Props["Holes"] = "-";
                 if (d.Name == "RAIL")
                 {
-                    d.Props["Description"] = "Rail, 42x42 pine";
-                    d.Props["Ends"] = "both " + f1(phi) + "° mitre, opposite (trapezoid), long face down";
+                    double fromEnd = c.BaseWidth / 2 - d.Bolts.Max(b => b.X);
+                    d.Props["Description"] = "Base rail, 42x42 pine";
+                    d.Props["Ends"] = "square";
+                    d.Props["Holes"] = f1(fromEnd) + " from each end, vertical, centred (base screws)";
                     continue;
                 }
                 if (d.Name == "FOOT")
                 {
                     d.Props["Description"] = "Foot, 42x42 pine";
                     d.Props["Ends"] = "square";
+                    d.Props["Holes"] = f1(c.FootL / 2) + " (middle), vertical, centred (base screw)";
                     continue;
                 }
 
@@ -410,6 +434,7 @@ namespace PineTree
                 if (square.Count > 0) parts2.Add(string.Join(", ", square) + " square");
                 if (angled.Count > 0)
                     parts2.Add(string.Join(", ", angled.Select(h => f1(h.Item1))) + " drilled level (" + f1(angled[0].Item2) + "° off square)");
+                if (d.Name.StartsWith("P3")) parts2.Add("base pilot via rail");
                 if (parts2.Count > 0) d.Props["Holes"] = string.Join("; ", parts2);
             }
         }
@@ -426,6 +451,9 @@ namespace PineTree
             lines.Add(q(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "Height {0} mm, base {1} mm, slope {2:F2} deg. Holes {3} mm through the side face, centred in the {4} mm thickness.",
                 c.H, c.BaseWidth, c.PhiDeg, c.BoltD, c.W)));
+            lines.Add(q(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "Base: legs stand on the rail, rail on the feet. One M6 coach screw per side up through foot + rail into the leg end grain ({0:0} mm in, pilot 4.5 drilled through the rail hole).",
+                c.BaseScrewDepth)));
             File.WriteAllLines(path, lines, System.Text.Encoding.UTF8);
             Console.WriteLine("Saved " + path);
         }
@@ -445,7 +473,9 @@ namespace PineTree
                 "Lower --L1/--L3 or raise --height.", c.H, c.L1, c.L3));
             need(c.L1 > c.W / Math.Sin(phi) + 150, string.Format(
                 "L1 {0} is too short: the top upright needs at least {1:F0} mm for the apex bolts.", c.L1, c.W / Math.Sin(phi) + 150));
-            need(c.H * Math.Tan(phi) - 3 * c.W / Math.Cos(phi) > 50, "Base is too narrow: no room for the rail between the legs.");
+            need((c.H - c.W) * Math.Tan(phi) - 3 * c.W / Math.Cos(phi) > 20, "Base is too narrow: the legs would meet on the rail.");
+            need(c.L3 - c.Overlap > c.W + 60, "L3 is too short: the bottom upright needs room below its lap.");
+            need(c.RailOverhang >= 0, "RailOverhang can't be negative.");
             need(c.PhiDeg <= 30, "Slope over 30 degrees: the star cap and the tip mitre get impractical. Narrow the base.");
             foreach (var d in parts.Where(p => !p.Printed))
             {
@@ -531,7 +561,7 @@ namespace PineTree
                          (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
 
             string path = Path.Combine(dir, d.Name + ".SLDPRT");
-            m.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
+            SaveDoc(m, path);
             app.CloseDoc(m.GetTitle());
             return path;
         }
@@ -677,14 +707,41 @@ namespace PineTree
         static void CloseDocsIn(SldWorks app, string dir)
         {
             string full = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
-            var docs = ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>()
-                .Where(d => d.GetPathName().StartsWith(full, StringComparison.OrdinalIgnoreCase))
+            Func<List<ModelDoc2>> inDir = () => ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>()
+                .Where(d => (d.GetPathName() ?? "").StartsWith(full, StringComparison.OrdinalIgnoreCase))
                 .OrderBy(d => d.GetType() == (int)swDocumentTypes_e.swDocDRAWING ? 0
                             : d.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY ? 1 : 2).ToList();
-            foreach (ModelDoc2 d in docs)
+            // A few passes: closing a drawing or assembly can leave its parts loaded (hidden) until next pass.
+            for (int pass = 0; pass < 3; pass++)
             {
-                Console.WriteLine("Closing open " + Path.GetFileName(d.GetPathName()));
-                app.CloseDoc(d.GetTitle());
+                var docs = inDir();
+                if (docs.Count == 0) break;
+                var info = docs.Select(d => new { Title = d.GetTitle(), Path = d.GetPathName(), d.Visible }).ToList();
+                foreach (var d in info)
+                {
+                    Console.WriteLine("Closing open " + System.IO.Path.GetFileName(d.Path) + (d.Visible ? "" : " (hidden)"));
+                    app.CloseDoc(d.Title);
+                }
+            }
+
+            // SOLIDWORKS can't save over a file it (or anything else) still has locked; stop early and say so.
+            var locked = Directory.GetFiles(full, "*.SLD*").Where(f =>
+            {
+                try { using (File.Open(f, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { } return false; }
+                catch (IOException) { return true; }
+            }).ToList();
+            if (locked.Count > 0)
+            {
+                var still = inDir();
+                throw new Exception("These files are still locked, so they can't be rebuilt: " +
+                    string.Join(", ", locked.Select(Path.GetFileName)) + ". " +
+                    (still.Count > 0
+                        ? "SOLIDWORKS still has loaded: " + string.Join(", ", still.Select(d => d.GetTitle() + (d.Visible ? "" : " (hidden)"))) + ". "
+                        : "SOLIDWORKS doesn't list them as open. ") +
+                    "Open windows that may be using them: " + string.Join(", ",
+                        ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>().Where(d => d.Visible)
+                        .Select(d => d.GetTitle() + " [" + (string.IsNullOrEmpty(d.GetPathName()) ? "not saved" : d.GetPathName()) + "]")) + ". " +
+                    "Close them in SOLIDWORKS (or restart it), or use a different output folder.");
             }
         }
 
@@ -796,7 +853,10 @@ namespace PineTree
                 "Hole positions are measured along the OUTER face (away from the centre) from the bottom long point.",
                 "'square' = perpendicular to the board. 'drilled level' = horizontal with the tree standing (apex bolts).",
                 "Left parts are mirror images of the right: same numbers.",
-                "Drill each lap through both boards together, clamped in place, to keep the holes aligned." });
+                "Drill each lap through both boards together, clamped in place, to keep the holes aligned.",
+                string.Format(inv, "BASE: bottom uprights stand on the rail, rail sits on the feet. Clamp each leg in place and drill a Ø4.5 pilot {0:0} mm", c.BaseScrewDepth),
+                string.Format(inv, "up through the rail hole into the leg end grain. Fix with an M6 x {0:0} coach screw up through foot + rail into the leg.",
+                    Math.Ceiling((2 * c.W + c.BaseScrewDepth) / 10) * 10 - 10) });
             var note = (Note)dm.InsertNote(notes);
             if (note != null)
             {
@@ -817,7 +877,12 @@ namespace PineTree
 
         static void SaveDoc(ModelDoc2 m, string path)
         {
-            m.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
+            int err = 0, warn = 0;
+            bool ok = m.Extension.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, null, ref err, ref warn);
+            if (!ok || err != 0)
+                throw new Exception(string.Format("Could not save {0} (error {1}, warnings {2}). Is it open elsewhere or read-only?",
+                    path, err, warn));
             Console.WriteLine("Saved " + path);
         }
     }
