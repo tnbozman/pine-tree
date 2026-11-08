@@ -2,6 +2,10 @@
 
 A flat, bolt-together Christmas tree in pine, generated in SOLIDWORKS from C#.
 
+<p align="center">
+  <img src="tree_render.png" alt="Render of the pine tree: three stepped uprights each side, lap-bolted, with fairy lights and a glowing star on top" width="420">
+</p>
+
 Change the height, base width or timber size on the command line, and `TreeBuilder` rebuilds every part, the assembly, and an A3 build sheet with cut lengths, saw angles and hole positions. Every joint is a bolt or screw, so it comes apart flat after Christmas.
 
 How the code works, and what went wrong getting it going: [docs/CAD-as-Code.md](docs/CAD-as-Code.md).
@@ -140,6 +144,7 @@ The star and its collar are one part, `STAR_CAP`, and every run exports it as `S
 | `TreeBuilder.cs`, `TreeBuilder.csproj` | The generator (.NET Framework 4.8, x64) |
 | `docs/CAD-as-Code.md` | Guide to the approach, API patterns and an FAQ of problems hit getting started |
 | `geometry_check.py` | The original Python geometry model and STL generator (42 × 42 design; needs shapely, trimesh and manifold3d) |
+| `tree_render.png` | Render of the tree, shown at the top of this page |
 | `plane_layout4.png` | Early layout sketch (the base and star have changed since) |
 | `stl/` | Star cap from the original 42 × 42 design (superseded by the generated `STAR_CAP.STL`) |
 
