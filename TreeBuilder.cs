@@ -119,6 +119,9 @@ namespace PineTree
         public double[] Axis = { 1, 0 };     // board axis, used for cut-list length
         public double[] Xs = { 0 };          // X offsets of instances in the assembly
         public bool Printed { get { return Stock.StartsWith("PETG"); } }
+        // Manufacturing info, written as custom properties and shown in the drawing's BOM:
+        // Description, Length, Ends, Holes.
+        public Dictionary<string, string> Props = new Dictionary<string, string>();
     }
 
     static class Program
@@ -168,6 +171,8 @@ namespace PineTree
                         Console.WriteLine("Saved " + paths[d.Name]);
                     }
                     MakeAssembly(app, parts, paths, zmin, dir);
+                    WriteCutListCsv(cfg, parts, Path.Combine(dir, "CutList.csv"));
+                    MakeDrawing(app, cfg, Path.Combine(dir, "PineTree.SLDASM"), dir);
                 }
                 finally
                 {
@@ -329,7 +334,100 @@ namespace PineTree
                 Pts = star,
                 Cuts = { Rect(-nh, yb - 1, nh, yt) }
             });
+            Describe(c, list);
             return list;
+        }
+
+        // Overall length of a timber part (long point to long point).
+        static double StockLength(PartDef d)
+        {
+            if (d.Name == "FOOT") return d.Depth;
+            if (d.Name == "RAIL") return d.Pts.Max(p => p[0]) - d.Pts.Min(p => p[0]);
+            var dots = d.Pts.Select(p => p[0] * d.Axis[0] + p[1] * d.Axis[1]).ToList();
+            return dots.Max() - dots.Min();
+        }
+
+        // Fill in the manufacturing properties for every part.
+        // Hole positions on an upright are measured along its OUTER face (the side away from the
+        // centre of the tree) from the bottom long point, which is the bottom corner of that face.
+        static void Describe(Cfg c, List<PartDef> parts)
+        {
+            double phi = c.PhiDeg;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            Func<double, string> f1 = v => v.ToString("0.0", inv);
+            var names = new Dictionary<string, string> {
+                { "P3", "Bottom upright" }, { "P2", "Middle upright" }, { "P1", "Top upright" } };
+
+            foreach (PartDef d in parts)
+            {
+                if (d.Printed)
+                {
+                    d.Props["Description"] = d.Name == "STAR_NECK" ? "Star cap neck (printed with plate)" : "Star plate (printed with neck)";
+                    d.Props["Length"] = "-";
+                    d.Props["Ends"] = "-";
+                    d.Props["Holes"] = d.Bolts.Count > 0 ? "printed in (star_cap.stl)" : "-";
+                    continue;
+                }
+                d.Props["Length"] = f1(StockLength(d));
+                d.Props["Holes"] = "-";
+                if (d.Name == "RAIL")
+                {
+                    d.Props["Description"] = "Rail, 42x42 pine";
+                    d.Props["Ends"] = "both " + f1(phi) + "° mitre, opposite (trapezoid), long face down";
+                    continue;
+                }
+                if (d.Name == "FOOT")
+                {
+                    d.Props["Description"] = "Foot, 42x42 pine";
+                    d.Props["Ends"] = "square";
+                    continue;
+                }
+
+                string side = d.Name.EndsWith("R") ? "right" : "left";
+                d.Props["Description"] = names[d.Name.Substring(0, 2)] + " " + side + ", 42x42 pine";
+                d.Props["Ends"] = d.Name.StartsWith("P1")
+                    ? "bottom " + f1(phi) + "° mitre; tip " + f1(90 - phi) + "° (cut vertical)"
+                    : "both " + f1(phi) + "° mitre, parallel";
+
+                // Outer face: from the outer bottom corner Pts[1] to the outer top Pts[0].
+                double[] o = d.Pts[1], t = d.Pts[0];
+                double ex = t[0] - o[0], ey = t[1] - o[1], el = Math.Sqrt(ex * ex + ey * ey);
+                ex /= el; ey /= el;
+                var holes = new List<Tuple<double, double>>();   // (distance, angle off square)
+                foreach (Bolt b in d.Bolts)
+                {
+                    // Where the bolt line crosses the outer face line: o + s e = (X,Y) + k (Dx,Dy)
+                    double det = ex * (-b.Dy) - ey * (-b.Dx);
+                    double s = ((b.X - o[0]) * (-b.Dy) - (b.Y - o[1]) * (-b.Dx)) / det;
+                    double bl = Math.Sqrt(b.Dx * b.Dx + b.Dy * b.Dy);
+                    double cosA = Math.Abs(ex * b.Dx + ey * b.Dy) / bl;   // cos of angle between bolt and board
+                    double off = Math.Abs(90 - Math.Acos(Math.Min(1, cosA)) * 180 / Math.PI);
+                    holes.Add(Tuple.Create(s, off));
+                }
+                var square = holes.Where(h => h.Item2 < 0.5).Select(h => f1(h.Item1)).ToList();
+                var angled = holes.Where(h => h.Item2 >= 0.5).OrderBy(h => h.Item1).ToList();
+                var parts2 = new List<string>();
+                if (square.Count > 0) parts2.Add(string.Join(", ", square) + " square");
+                if (angled.Count > 0)
+                    parts2.Add(string.Join(", ", angled.Select(h => f1(h.Item1))) + " drilled level (" + f1(angled[0].Item2) + "° off square)");
+                if (parts2.Count > 0) d.Props["Holes"] = string.Join("; ", parts2);
+            }
+        }
+
+        // Cut list as CSV, next to the SOLIDWORKS files.
+        static void WriteCutListCsv(Cfg c, List<PartDef> parts, string path)
+        {
+            Func<string, string> q = s => "\"" + s.Replace("\"", "\"\"") + "\"";
+            var lines = new List<string> { "Part,Qty,Description,Length mm,Ends,Holes (mm along outer face from bottom long point)" };
+            foreach (PartDef d in parts)
+                lines.Add(string.Join(",", q(d.Name), d.Xs.Length, q(d.Props["Description"]), q(d.Props["Length"]),
+                                      q(d.Props["Ends"]), q(d.Props["Holes"])));
+            lines.Add("");
+            lines.Add(q(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "Height {0} mm, base {1} mm, slope {2:F2} deg. Holes {3} mm through the side face, centred in the {4} mm thickness.",
+                c.H, c.BaseWidth, c.PhiDeg, c.BoltD, c.W)));
+            File.WriteAllLines(path, lines, System.Text.Encoding.UTF8);
+            Console.WriteLine("Saved " + path);
         }
 
         static List<double[]> Rect(double x0, double y0, double x1, double y1)
@@ -349,10 +447,9 @@ namespace PineTree
                 "L1 {0} is too short: the top upright needs at least {1:F0} mm for the apex bolts.", c.L1, c.W / Math.Sin(phi) + 150));
             need(c.H * Math.Tan(phi) - 3 * c.W / Math.Cos(phi) > 50, "Base is too narrow: no room for the rail between the legs.");
             need(c.PhiDeg <= 30, "Slope over 30 degrees: the star cap and the tip mitre get impractical. Narrow the base.");
-            foreach (var d in parts.Where(p => !p.Printed && p.Name != "FOOT"))
+            foreach (var d in parts.Where(p => !p.Printed))
             {
-                var dots = d.Pts.Select(p => p[0] * d.Axis[0] + p[1] * d.Axis[1]).ToList();
-                double len = d.Name == "RAIL" ? d.Pts.Max(p => p[0]) - d.Pts.Min(p => p[0]) : dots.Max() - dots.Min();
+                double len = StockLength(d);
                 if (len > c.StockLen - 10)
                     Console.WriteLine("WARNING: {0} is {1:F0} mm, longer than the {2:F0} mm stock (--StockLen).", d.Name, len, c.StockLen);
             }
@@ -362,20 +459,12 @@ namespace PineTree
 
         static void PrintCutList(List<PartDef> parts)
         {
-            Console.WriteLine("Part       Stock             Stock length (mm)  x  bolt holes");
+            Console.WriteLine("Part   Qty  Length  Ends / Holes (mm along outer face from bottom long point)");
             foreach (PartDef d in parts)
             {
                 if (d.Printed) continue;
-                double len;
-                if (d.Name == "FOOT") len = d.Depth;
-                else if (d.Name == "RAIL") len = d.Pts.Max(p => p[0]) - d.Pts.Min(p => p[0]);
-                else
-                {
-                    var dots = d.Pts.Select(p => p[0] * d.Axis[0] + p[1] * d.Axis[1]).ToList();
-                    len = dots.Max() - dots.Min();
-                }
-                Console.WriteLine("{0,-10} {1,-17} {2,8:F1}   x{3}   bolts: {4}", d.Name, d.Stock, len, d.Xs.Length,
-                    string.Join(" ", d.Bolts.Select(b => string.Format("({0:F1},{1:F1})", b.X, b.Y))));
+                Console.WriteLine("{0,-6} x{1}  {2,6}  {3}", d.Name, d.Xs.Length, d.Props["Length"], d.Props["Ends"]);
+                if (d.Props["Holes"] != "-") Console.WriteLine("                     holes: " + d.Props["Holes"]);
             }
             Console.WriteLine("Printed PETG: STAR_NECK + STAR_PLATE (one piece in star_cap.stl)");
         }
@@ -437,6 +526,9 @@ namespace PineTree
             CustomPropertyManager cpm = m.Extension.CustomPropertyManager[""];
             cpm.Add3("Stock", (int)swCustomInfoType_e.swCustomInfoText, d.Stock,
                      (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+            foreach (var kv in d.Props)
+                cpm.Add3(kv.Key, (int)swCustomInfoType_e.swCustomInfoText, kv.Value,
+                         (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
 
             string path = Path.Combine(dir, d.Name + ".SLDPRT");
             m.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
@@ -587,12 +679,140 @@ namespace PineTree
             string full = Path.GetFullPath(dir).TrimEnd('\\') + "\\";
             var docs = ((object[])app.GetDocuments() ?? new object[0]).Cast<ModelDoc2>()
                 .Where(d => d.GetPathName().StartsWith(full, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(d => d.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY ? 0 : 1).ToList();
+                .OrderBy(d => d.GetType() == (int)swDocumentTypes_e.swDocDRAWING ? 0
+                            : d.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY ? 1 : 2).ToList();
             foreach (ModelDoc2 d in docs)
             {
                 Console.WriteLine("Closing open " + Path.GetFileName(d.GetPathName()));
                 app.CloseDoc(d.GetTitle());
             }
+        }
+
+        // A3 drawing: front view of the tree with balloons, a BOM listing each part's Description, Length,
+        // Ends and Holes custom properties, and notes on how the numbers are measured. Saved as
+        // PineTree.SLDDRW and exported to PineTree.PDF.
+        static void MakeDrawing(SldWorks app, Cfg c, string asmPath, string dir)
+        {
+            Console.WriteLine("Building drawing");
+            string tpl = app.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
+            if (string.IsNullOrEmpty(tpl) || !File.Exists(tpl))
+                tpl = Directory.GetFiles(@"C:\ProgramData\SOLIDWORKS", "*.drwdot", SearchOption.AllDirectories).FirstOrDefault();
+            if (tpl == null) throw new Exception("No drawing template. Set Tools > Options > Default Templates > Drawings.");
+
+            var dm = (ModelDoc2)app.NewDocument(tpl, (int)swDwgPaperSizes_e.swDwgPaperA3size, 0.420, 0.297);
+            if (dm == null) throw new Exception("Could not create a drawing from " + tpl);
+            var dd = (DrawingDoc)dm;
+            var sheet = (Sheet)dd.GetCurrentSheet();
+            double sw = 0.420, sh = 0.297;
+            try { sheet.GetSize(ref sw, ref sh); } catch (Exception) { }
+
+            // Front view on the left third of the sheet, at a standard scale that fits.
+            double treeH = (c.H + 45 + c.StarR + 50) * MM, treeW = (c.BaseWidth + 100) * MM;
+            double[] scales = { 1.0 / 5, 1.0 / 8, 1.0 / 10, 1.0 / 15, 1.0 / 20, 1.0 / 25 };
+            double scale = scales.FirstOrDefault(s => treeH * s < sh * 0.75 && treeW * s < sw * 0.30);
+            if (scale == 0) scale = scales.Last();
+            double vx = sw * 0.17, vy = sh * 0.52;
+            var view = dd.CreateDrawViewFromModelView3(asmPath, "*Front", vx, vy, 0);
+            if (view == null) throw new Exception("Could not place the front view.");
+            view.ScaleDecimal = scale;
+            view.Position = new double[] { vx, vy };
+            Console.WriteLine("  front view at 1:" + Math.Round(1 / scale));
+
+            // Balloons on the view (item numbers match the BOM).
+            try
+            {
+                dm.ClearSelection2(true);
+                dm.Extension.SelectByID2(view.Name, "DRAWINGVIEW", 0, 0, 0, false, 0, null, 0);
+                var bo = dd.CreateAutoBalloonOptions();
+                bo.Layout = (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Square;
+                bo.IgnoreMultiple = true;
+                bo.Style = (int)swBalloonStyle_e.swBS_Circular;
+                dd.AutoBalloon5(bo);
+                dm.ClearSelection2(true);
+            }
+            catch (Exception ex) { Console.WriteLine("  (balloons skipped: " + ex.Message + ")"); }
+
+            // BOM, top right.
+            string bomTpl = Path.Combine(Path.GetDirectoryName(app.GetExecutablePath()), @"lang\english\bom-standard.sldbomtbt");
+            if (!File.Exists(bomTpl)) bomTpl = "";
+            var bom = view.InsertBomTable4(true, sw - 0.010, sh - 0.010,
+                (int)swBOMConfigurationAnchorType_e.swBOMConfigurationAnchor_TopRight,
+                (int)swBomType_e.swBomType_PartsOnly, "", bomTpl, false,
+                (int)swNumberingType_e.swNumberingType_Flat, false);
+            if (bom == null) throw new Exception("Could not insert the BOM table.");
+            var table = (TableAnnotation)bom;
+            Func<string, int> colOf = title => Enumerable.Range(0, table.ColumnCount)
+                .FirstOrDefault(i => (table.GetColumnTitle2(i, true) ?? "").Trim() == title);
+            // Description goes right after PART NUMBER (unless the template already has one).
+            if (!Enumerable.Range(0, table.ColumnCount).Any(i => (table.GetColumnTitle2(i, true) ?? "").Trim() == "DESCRIPTION"))
+            {
+                int pn = colOf("PART NUMBER");
+                table.InsertColumn2((int)swTableItemInsertPosition_e.swTableItemInsertPosition_After, pn,
+                    "DESCRIPTION", (int)swInsertTableColumnWidthStyle_e.swInsertColumn_DefaultWidth);
+                bom.SetColumnCustomProperty(pn + 1, "Description");
+                table.SetColumnTitle2(pn + 1, "DESCRIPTION", true);
+            }
+            foreach (var col in new[] { "Length", "Ends", "Holes" })
+            {
+                table.InsertColumn2((int)swTableItemInsertPosition_e.swTableItemInsertPosition_Last, table.ColumnCount - 1,
+                    col.ToUpper(), (int)swInsertTableColumnWidthStyle_e.swInsertColumn_DefaultWidth);
+                int idx = table.ColumnCount - 1;
+                bom.SetColumnCustomProperty(idx, col);
+                table.SetColumnTitle2(idx, col == "Length" ? "LENGTH (mm)" : col == "Holes" ? "HOLES (mm)" : "END CUTS", true);
+            }
+            // Smaller text so the long hole lists fit, and widths to suit.
+            try
+            {
+                var tf = table.GetTextFormat();
+                tf.CharHeight = 0.0022;
+                table.SetTextFormat(false, tf);
+            }
+            catch (Exception) { }
+            var widths = new Dictionary<string, double> {
+                { "ITEM NO.", 0.010 }, { "PART NUMBER", 0.022 }, { "DESCRIPTION", 0.045 }, { "QTY.", 0.009 },
+                { "LENGTH (mm)", 0.018 }, { "END CUTS", 0.072 }, { "HOLES (mm)", 0.105 } };
+            double tableW = 0;
+            for (int i = 0; i < table.ColumnCount; i++)
+            {
+                double wcol;
+                if (widths.TryGetValue((table.GetColumnTitle2(i, true) ?? "").Trim(), out wcol)) table.SetColumnWidth(i, wcol, 0);
+                tableW += widths.TryGetValue((table.GetColumnTitle2(i, true) ?? "").Trim(), out wcol) ? wcol : 0.02;
+            }
+            // Compact rows (they stay tall after the columns are narrowed otherwise).
+            double tableH = 0;
+            for (int r = 0; r < table.RowCount; r++)
+            {
+                double rh = r == 0 ? 0.008 : 0.0065;
+                table.SetRowHeight(r, rh, 0);
+                tableH += rh;
+            }
+
+            // Notes under the BOM.
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string notes = string.Join(System.Environment.NewLine, new[] {
+                string.Format(inv, "PINE TREE  -  height {0:0} mm, base {1:0} mm, slope {2:0.0}\u00b0 from vertical", c.H, c.BaseWidth, c.PhiDeg),
+                "LENGTH is long point to long point. Mitre angles are measured from square (saw setting).",
+                string.Format(inv, "HOLES: \u00d8{0} mm, drilled through the side face, centred in the {1:0} mm thickness.", c.BoltD, c.W),
+                "Hole positions are measured along the OUTER face (away from the centre) from the bottom long point.",
+                "'square' = perpendicular to the board. 'drilled level' = horizontal with the tree standing (apex bolts).",
+                "Left parts are mirror images of the right: same numbers.",
+                "Drill each lap through both boards together, clamped in place, to keep the holes aligned." });
+            var note = (Note)dm.InsertNote(notes);
+            if (note != null)
+            {
+                var ann = (Annotation)note.GetAnnotation();
+                ann.SetPosition2(sw - 0.010 - tableW, sh - 0.010 - tableH - 0.012, 0);   // under the BOM
+            }
+
+            dm.EditRebuild3();
+            SaveDoc(dm, Path.Combine(dir, "PineTree.SLDDRW"));
+            int err = 0, warn = 0;
+            string pdf = Path.Combine(dir, "PineTree.PDF");
+            if (dm.Extension.SaveAs3(pdf, (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, null, ref err, ref warn))
+                Console.WriteLine("Saved " + pdf);
+            else
+                Console.WriteLine("PDF export failed (error " + err + "). Use File > Save As > PDF on the drawing.");
         }
 
         static void SaveDoc(ModelDoc2 m, string path)

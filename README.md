@@ -62,6 +62,13 @@ Start SOLIDWORKS from 3DEXPERIENCE first and leave it open; the program attaches
 Then run `TreeBuilder.exe [folder] [options]`: it writes each part and `PineTree.SLDASM`, with the bolt holes.
 Re-running overwrites the files (it closes any of them that are open in SOLIDWORKS first).
 
+Build instructions come out with every run, for the current size:
+- `PineTree.PDF` / `PineTree.SLDDRW`: A3 sheet with the front view, balloons, and a BOM listing each part's length, end cuts and hole positions
+- `CutList.csv`: the same table
+- each part carries custom properties `Description`, `Length`, `Ends`, `Holes` (File > Properties)
+
+Hole positions are measured along the board's outer face (away from the centre of the tree) from the bottom long point.
+
 Options (mm):
 - `--height 1210`: tip of the wood above the floor
 - `--base 610`: outside width of the legs at the floor. The upright slope is worked out from height and base.
