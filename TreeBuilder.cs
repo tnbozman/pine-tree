@@ -117,12 +117,21 @@ namespace PineTree
         public Bolt(double x, double y, double dx, double dy, double len) { X = x; Y = y; Dx = dx; Dy = dy; Len = len; }
     }
 
+    // An extra outline extruded into a part and merged with it, spanning z = Z0 .. Z0 + Depth (mm).
+    class Extra
+    {
+        public List<double[]> Pts = new List<double[]>();
+        public double Depth, Z0;
+    }
+
     class PartDef
     {
         public string Name = "", Stock = "";
         public List<double[]> Pts = new List<double[]>();
         public List<Bolt> Bolts = new List<Bolt>();
         public List<List<double[]>> Cuts = new List<List<double[]>>();   // outlines cut through the part
+        public List<Extra> Extras = new List<Extra>();                   // more outlines extruded and merged in
+        public bool Stl;                                                 // also export the part as .STL
         public double Depth;                 // total thickness (Z), centred on the Front plane
         public double[] Axis = { 1, 0 };     // board axis, used for cut-list length
         public double[] Xs = { 0 };          // X offsets of instances in the assembly
@@ -343,23 +352,26 @@ namespace PineTree
                 double r = k % 2 == 0 ? c.StarR : ri, ang = (90 + 36 * k) * Math.PI / 180;
                 return P(r * Math.Cos(ang), yc + r * Math.Sin(ang));
             }).ToList();
-            list.Add(new PartDef { Name = "STAR_PLATE", Stock = printed, Depth = c.CapPlateT, Pts = star });
-
             // Collar: tapered sleeve over the two top tips, 72 deep. Its sides run parallel to the outside of the
             // top uprights, CapWall out, and meet in a point inside the star, so the tree's outline carries on
-            // up into the star. Inside: the V slot the tips sit in (0.4 mm clearance). The part of the collar
-            // inside the star outline is cut away here (the star part has it); printed, the two are one piece.
+            // up into the star. Inside: the V slot the tips sit in (0.4 mm clearance).
             double clr = 0.4, ytip = ha + clr / sin, yb = ha - 72;
             double xb = (ha - yb) * tan + c.CapWall / cos, ypk = ha + c.CapWall / sin;
             double sx = (ytip - (yb - 1)) * tan;
             Func<double, double> collarHalf = y => (ha - y) * tan + c.CapWall / cos;
             var capBolts = new List<Bolt> {
                 new Bolt(0, ha - 40, 1, 0, 2 * collarHalf(ha - 40) + 20), new Bolt(0, ha - 62, 1, 0, 2 * collarHalf(ha - 62) + 20) };
+
+            // One printed part: the collar (CapNeckH deep) with the star merged on, both centred on the middle of
+            // the wood's thickness. The collar's point overlaps the star, so the two fuse into one solid.
+            // Printed back face down, the star's arms need supports underneath.
             list.Add(new PartDef
             {
-                Name = "STAR_NECK", Stock = printed, Depth = c.CapNeckH, Bolts = capBolts,
+                Name = "STAR_CAP", Stock = printed, Depth = c.CapNeckH, Bolts = capBolts,
                 Pts = new List<double[]> { P(-xb, yb), P(xb, yb), P(0, ypk) },
-                Cuts = { new List<double[]> { P(-sx, yb - 1), P(0, ytip), P(sx, yb - 1) }, star }
+                Extras = { new Extra { Pts = star, Depth = c.CapPlateT, Z0 = -c.CapPlateT / 2 } },
+                Cuts = { new List<double[]> { P(-sx, yb - 1), P(0, ytip), P(sx, yb - 1) } },
+                Stl = true
             });
             Describe(c, list);
             return list;
@@ -389,10 +401,10 @@ namespace PineTree
             {
                 if (d.Printed)
                 {
-                    d.Props["Description"] = d.Name == "STAR_NECK" ? "Star collar (printed with star)" : "Star (printed with collar)";
+                    d.Props["Description"] = "Star cap, printed in one piece (STAR_CAP.STL)";
                     d.Props["Length"] = "-";
-                    d.Props["Ends"] = "-";
-                    d.Props["Holes"] = d.Bolts.Count > 0 ? "printed in (star_cap.stl)" : "-";
+                    d.Props["Ends"] = "print back face down, supports under the star";
+                    d.Props["Holes"] = "printed in: level, 40 and 62 below the tip";
                     continue;
                 }
                 d.Props["Length"] = f1(StockLength(d));
@@ -502,7 +514,7 @@ namespace PineTree
                 Console.WriteLine("{0,-6} x{1}  {2,6}  {3}", d.Name, d.Xs.Length, d.Props["Length"], d.Props["Ends"]);
                 if (d.Props["Holes"] != "-") Console.WriteLine("                     holes: " + d.Props["Holes"]);
             }
-            Console.WriteLine("Printed PETG: STAR_NECK + STAR_PLATE (one piece in star_cap.stl)");
+            Console.WriteLine("Printed PETG: STAR_CAP (star + collar, one piece; exported as STAR_CAP.STL)");
         }
 
         // ------------------------------------------------------------ SOLIDWORKS
@@ -533,6 +545,36 @@ namespace PineTree
                 d.Depth * MM, 0, false, false, false, false, 0, 0,
                 false, false, false, false, true, true, true, 0, 0, false);
             if (ext == null) throw new Exception("Extrude failed for " + d.Name);
+
+            // Extra outlines (the star on the star cap): extruded from an offset start (Z0) for Depth and merged.
+            foreach (var ex in d.Extras)
+            {
+                string es = OpenSketchOnFront(m);
+                Console.WriteLine("  " + d.Name + ": " + es + " merged extrude");
+                DrawLoop(m, ex.Pts);
+                CloseAndSelectSketch(m, es);
+                Func<bool, Feature> extrude = dir => m.FeatureManager.FeatureExtrusion3(
+                    true, false, dir, (int)swEndConditions_e.swEndCondBlind, 0,
+                    ex.Depth * MM, 0, false, false, false, false, 0, 0,
+                    false, false, false, false, true, true, true,
+                    (int)swStartConditions_e.swStartOffset, Math.Abs(ex.Z0) * MM, ex.Z0 < 0);
+                Feature ef = extrude(false);
+                if (ef == null) throw new Exception("Merged extrude failed in " + d.Name);
+                // Make sure it went the intended way (into the part, not out of the back): check the z extent.
+                double[] bx = (double[])((PartDoc)m).GetPartBox(true);
+                double want0 = Math.Min(ex.Z0, -d.Depth / 2), want1 = Math.Max(ex.Z0 + ex.Depth, d.Depth / 2);
+                if (bx[2] / MM < want0 - 0.5 || bx[5] / MM > want1 + 0.5)
+                {
+                    m.EditUndo2(1);
+                    m.ClearSelection2(true);
+                    m.Extension.SelectByID2(es, "SKETCH", 0, 0, 0, false, 0, null, 0);   // sketch is closed: just reselect it
+                    ef = extrude(true);
+                    if (ef == null) throw new Exception("Merged extrude failed in " + d.Name + " (reversed)");
+                }
+                var bodies = (object[])((PartDoc)m).GetBodies2((int)swBodyType_e.swSolidBody, true);
+                if (bodies == null || bodies.Length != 1)
+                    Console.WriteLine("  WARNING: " + d.Name + " has " + (bodies == null ? 0 : bodies.Length) + " bodies, expected 1");
+            }
 
             // Outline cuts (star cap slot / notch): sketched on the Front plane, cut mid-plane right through.
             foreach (var cut in d.Cuts)
@@ -568,8 +610,42 @@ namespace PineTree
 
             string path = Path.Combine(dir, d.Name + ".SLDPRT");
             SaveDoc(m, path);
+            if (d.Stl) ExportStl(app, m, Path.Combine(dir, d.Name + ".STL"));
             app.CloseDoc(m.GetTitle());
             return path;
+        }
+
+        // Save the open part as a binary STL in millimetres, fine quality, without any SOLIDWORKS dialogs.
+        // The user's STL export settings are put back afterwards.
+        static void ExportStl(SldWorks app, ModelDoc2 m, string path)
+        {
+            int units = (int)swUserPreferenceIntegerValue_e.swExportStlUnits, quality = (int)swUserPreferenceIntegerValue_e.swSTLQuality;
+            var toggles = new[] { swUserPreferenceToggle_e.swSTLBinaryFormat, swUserPreferenceToggle_e.swSTLShowInfoOnSave,
+                                  swUserPreferenceToggle_e.swSTLPreview, swUserPreferenceToggle_e.swSTLDontTranslateToPositive };
+            int unitsWas = app.GetUserPreferenceIntegerValue(units), qualityWas = app.GetUserPreferenceIntegerValue(quality);
+            var was = toggles.ToDictionary(t => t, t => app.GetUserPreferenceToggle((int)t));
+            try
+            {
+                app.SetUserPreferenceIntegerValue(units, (int)swLengthUnit_e.swMM);
+                app.SetUserPreferenceIntegerValue(quality, (int)swSTLQuality_e.swSTLQuality_Fine);
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swSTLBinaryFormat, true);
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swSTLShowInfoOnSave, false);   // no pop-up
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swSTLPreview, false);          // no preview
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swSTLDontTranslateToPositive, false);
+                m.ClearSelection2(true);   // with anything selected, SOLIDWORKS exports only the selection
+                int err = 0, warn = 0;
+                bool ok = m.Extension.SaveAs3(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent | (int)swSaveAsOptions_e.swSaveAsOptions_Copy,
+                    null, null, ref err, ref warn);
+                if (!ok || err != 0) throw new Exception("STL export failed for " + path + " (error " + err + ")");
+                Console.WriteLine("Saved " + path);
+            }
+            finally
+            {
+                app.SetUserPreferenceIntegerValue(units, unitsWas);
+                app.SetUserPreferenceIntegerValue(quality, qualityWas);
+                foreach (var t in toggles) app.SetUserPreferenceToggle((int)t, was[t]);
+            }
         }
 
         // Round hole along any in-plane direction: revolve a thin rectangle 360 deg about its centre line.

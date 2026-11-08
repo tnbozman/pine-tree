@@ -36,7 +36,8 @@ Each run writes these to the output folder:
 | `PineTree.PDF`, `PineTree.SLDDRW` | A3 build sheet: front view with balloons, parts table (length, end cuts, holes), notes, and a 1:2.5 close-up of the star |
 | `CutList.csv` | The parts table as a spreadsheet |
 | `PineTree.SLDASM` | The assembly, every part fixed in place |
-| `P1L` … `P3R`, `RAIL`, `FOOT`, `STAR_NECK`, `STAR_PLATE` (`.SLDPRT`) | One file per part, with custom properties `Description`, `Length`, `Ends`, `Holes` |
+| `P1L` … `P3R`, `RAIL`, `FOOT`, `STAR_CAP` (`.SLDPRT`) | One file per part, with custom properties `Description`, `Length`, `Ends`, `Holes` |
+| `STAR_CAP.STL` | The star and collar, ready to print |
 
 ## Changing the size
 
@@ -126,9 +127,11 @@ To take it apart, reverse the steps.
 
 ## The printed star
 
-The star and collar are modelled in SOLIDWORKS as `STAR_PLATE` and `STAR_NECK`, and they follow the size you build. Print them as one piece in PETG (or ASA if the tree sits in the sun), star flat on the bed.
+The star and its collar are one part, `STAR_CAP`, and every run exports it as `STAR_CAP.STL`. The export is binary, in millimetres, at fine quality. It follows the size you build: the V slot matches the slope and the collar matches the timber thickness.
 
-`stl/star_cap.stl` is from the original 42 × 42 design (notched star, 18° slot). It does not fit the current tree. Until `geometry_check.py` is updated to the new star, export the two SOLIDWORKS parts to STL instead.
+- **Shape:** the star is 12 mm thick and centred in the depth of the wood. The collar is as deep as the timber (90 mm at the defaults). At the defaults the cap is 162 × 194 × 90 mm.
+- **Printing:** PETG, or ASA if the tree sits in the sun. Lay it back face down. The star's arms are about 39 mm off the bed, so add supports under them (tree supports work well).
+- **Fixing:** the two M6 holes through the collar are printed in.
 
 ## Repository
 
@@ -138,7 +141,7 @@ The star and collar are modelled in SOLIDWORKS as `STAR_PLATE` and `STAR_NECK`, 
 | `docs/CAD-as-Code.md` | Guide to the approach, API patterns and an FAQ of problems hit getting started |
 | `geometry_check.py` | The original Python geometry model and STL generator (42 × 42 design; needs shapely, trimesh and manifold3d) |
 | `plane_layout4.png` | Early layout sketch (the base and star have changed since) |
-| `stl/` | Printable star cap from the original design |
+| `stl/` | Star cap from the original 42 × 42 design (superseded by the generated `STAR_CAP.STL`) |
 
 ## License
 
