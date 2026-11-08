@@ -1,90 +1,145 @@
-# Stepped pine Christmas tree (flat, 42x42 pine, bolt-together)
+# PineTree
 
-One flat plane. Three parallel uprights per side overlap 130 mm with their long faces touching.
-The bottom upright under-laps the middle, and the middle under-laps the top (the top one is on the outer line).
-All lap ends are cut horizontal. Nothing is cut into other wood. All bolts run in the plane, perpendicular to the boards
-(outer to inner). Nothing goes front to back. See `plane_layout4.png`.
+A flat, bolt-together Christmas tree in pine, generated in SOLIDWORKS from C#.
 
-Size: about 610 mm wide at the base (outside of the legs) and 1210 mm to the tip of the wood, star on top.
+Change the height, base width or timber size on the command line, and `TreeBuilder` rebuilds every part, the assembly, and an A3 build sheet with cut lengths, saw angles and hole positions. Every joint is a bolt or screw, so it comes apart flat after Christmas.
 
-## Shopping (Bunnings)
-- 42x42 DAR pine 1.8 m x 3 (about $69). Cuts fit with 5 mm kerf:
-  1. P2 571 + P2 571 + RAIL 521
-  2. P3 508 + P3 508 + P1 494
-  3. P1 494 + FOOT 450 + FOOT 450
-- M6 x 100 bolts (or M6 threaded rod cut to 100) x 8 for the laps, plus 8 nuts and 16 washers
-- Apex: M6 x 80 (at 90 mm below tip) and M6 x 120 (at 140 mm), plus 2 x M6 x 80 for the star cap (40 and 62 mm below tip). Nuts and washers for each
-- 4 x M6 x 100 coach screws (rail to legs) and 2 x M6 x 80 coach screws (feet)
+How the code works, and what went wrong getting it going: [docs/CAD-as-Code.md](docs/CAD-as-Code.md).
 
-## Cut list (stock length, mitre saw)
-| Part | Qty | Length | Ends |
-|---|---|---|---|
-| P3 bottom upright | 2 | 507.8 | both ends 18 degree mitre, parallel (a parallelogram) |
-| P2 middle upright | 2 | 570.9 | both ends 18 degree mitre, parallel |
-| P1 top upright | 2 | 494.2 | lap end 18 degree mitre (horizontal), tip end 72 degree mitre (vertical cut so the pair meet) |
-| RAIL | 1 | 521.3 | both ends 18 degree mitre, short face up |
-| FOOT | 2 | 450 | square |
+## The design
 
-The 72 degree tip cut is beyond most mitre saws. Either cut it with a pull saw along a marked line held in the vice,
-or clamp a 27 degree wedge jig to the saw fence (45 + 27 = 72).
-Mirror the left side (P3R/P3L etc.): cut right boards, then flip the saw angle for the left.
+- **One flat plane.** Each side has three uprights stepping inwards: the top one (P1) is on the outer line, the middle one (P2) is one board width inside it, and the bottom one (P3) is one more inside.
+- **Lap joints.** The uprights overlap by 130 mm with their side faces touching. Nothing is cut into other wood.
+- **Bolts in the plane.** Lap bolts run square through both boards. Apex bolts run level through both top uprights. Nothing goes front to back.
+- **Base.** The bottom uprights stand on a full-width rail, 20 mm in from each end. The rail sits on two feet that run front to back. One coach screw per side goes up through the foot and rail into the end grain of the leg.
+- **Star.** A full five-point star on a printed collar. The collar's sides continue the line of the top uprights, and it grips both tips in a V slot.
 
-## Hole positions (right side; left is the mirror)
-All holes 6.5 mm, drilled square across the board face (drill press or a drilling guide), 42 mm board width.
-Coordinates are x, y of the bolt centre in the face-on view; y up from the underside of the rail, x from the centreline.
-Bolt direction is perpendicular to the uprights.
-| Bolt | x | y | goes through |
-|---|---|---|---|
-| Lap 1 | 184.6 | 370 | P3 + P2 |
-| Lap 2 | 161.9 | 440 | P3 + P2 |
-| Lap 3 | 98.8 | 770 | P2 + P1 |
-| Lap 4 | 76.1 | 840 | P2 + P1 |
-On each board measure along its length from the lap end: bolts are 30 mm in from each end of each lap.
-Apex (horizontal, through both P1 and the star neck): at 40, 62, 90 and 140 mm below the tip.
+## Quick start
 
-## Printed part (Bambu P1S, PETG)
-`stl/star_cap.stl`: star plus neck block as one piece, 162 x 202 x 42 mm. The V slot grips both tips.
-- Print as it sits (star flat on the bed), 0.2 mm layers, 5 walls, 40% gyroid, no supports
-- One M6 nut pocket on the left and a washer recess on the right for each of the two neck bolts
-- Use ASA instead of PETG if the tree sits in sun
+You need Windows, SOLIDWORKS with its API (developed on SOLIDWORKS 3DEXPERIENCE R2026x), and the .NET SDK.
+
+```powershell
+dotnet build -c Release
+# 1. Start SOLIDWORKS yourself and wait for it to finish loading.
+# 2. Then:
+.\bin\Release\net48\TreeBuilder.exe D:\Projects\christmas-tree\out
+```
+
+- **Start SOLIDWORKS first.** The program attaches to a running SOLIDWORKS and never starts one itself. Run it from a terminal at the same elevation as SOLIDWORKS (both normal, or both as administrator).
+- **Re-running overwrites the output.** Files from the output folder that are open in SOLIDWORKS are closed first. If something else still holds them, the program stops and tells you which window to close.
+- **Different install folder:** if SOLIDWORKS isn't in the default folder, build with `dotnet build -c Release /p:SWAPI="<install>\SOLIDWORKS\api\redist"`.
+
+Each run writes these to the output folder:
+
+| File | What it is |
+| --- | --- |
+| `PineTree.PDF`, `PineTree.SLDDRW` | A3 build sheet: front view with balloons, parts table (length, end cuts, holes), notes, and a 1:2.5 close-up of the star |
+| `CutList.csv` | The parts table as a spreadsheet |
+| `PineTree.SLDASM` | The assembly, every part fixed in place |
+| `P1L` … `P3R`, `RAIL`, `FOOT`, `STAR_NECK`, `STAR_PLATE` (`.SLDPRT`) | One file per part, with custom properties `Description`, `Length`, `Ends`, `Holes` |
+
+## Changing the size
+
+Every setting is an option. Try a size with `--preview` first: it prints the slope, cut list and hole positions, checks that the design goes together, and stops without touching SOLIDWORKS.
+
+```powershell
+.\bin\Release\net48\TreeBuilder.exe --preview --height 1500 --base 1000
+.\bin\Release\net48\TreeBuilder.exe D:\Projects\christmas-tree\out --height 1500 --base 1000
+```
+
+| Option | Default (mm) | Meaning |
+| --- | --- | --- |
+| `--height` | 1210 | Tip of the wood above the underside of the rail |
+| `--base` | 922 | Length of the rail, which is the overall width of the base. The upright slope is worked out from height and base. |
+| `--W` | 45 | Board width seen from the front; also the rail height |
+| `--T` | 90 | Board thickness front to back. For 42 × 42 timber use `--W 42 --T 42`. |
+| `--Overlap` | 130 | Overlap of each lap |
+| `--L1`, `--L3` | auto | Height covered by the top and bottom uprights (470 at a height of 1210, scaling with height); the middle one takes the rest |
+| `--RailOverhang` | 20 | Rail beyond the outside of each leg |
+| `--BaseScrewDepth` | 50 | Depth of the base coach screw into the leg |
+| `--FootL` | 450 | Foot length, front to back |
+| `--BoltD` | 6.5 | Hole diameter (M6 clearance) |
+| `--StarR`, `--StarGap`, `--CapWall` | 85, 3, 8 | Star radius, gap between the wood tip and the star, collar wall thickness |
+| `--CapNeckH`, `--CapPlateT` | auto, 12 | Collar depth (follows `--T`) and star thickness |
+| `--StockLen` | 1800 | Length of timber you buy; only used to warn about boards that won't fit |
+
+The program refuses sizes that won't go together, with a plain reason. Examples: laps on the middle upright that would meet, legs that would meet on the rail, or a slope over 30°.
+
+## Default size
+
+At the defaults the tree is 922 mm wide, about 1375 mm tall to the top of the star (including the 45 mm feet), and the uprights lean 24.9° from vertical.
+
+### Cut list
+
+| Part | Qty | Length (mm) | Ends |
+| --- | --- | --- | --- |
+| P3 bottom upright | 2 | 489.3 | both 24.9° mitre, parallel |
+| P2 middle upright | 2 | 605.1 | both 24.9° mitre, parallel |
+| P1 top upright | 2 | 518.1 | bottom 24.9° mitre; tip 65.1°, so it stands vertical and the pair meet |
+| RAIL | 1 | 922.0 | square |
+| FOOT | 2 | 450.0 | square, laid wide face down |
+
+- **Lengths** are long point to long point, and saw angles are measured from square.
+- **Left and right:** cut the right-hand boards, then flip the saw angle for the left.
+- **The 65.1° tip cut** is beyond most mitre saws. Mark it and cut by hand, or clamp a 20.1° wedge to the fence and set the saw to 45°.
+- **Cutting plan**, from two 3.0 m lengths of 90 × 45 with a 5 mm kerf:
+  1. RAIL 922, P2 605, P2 605, P1 518 (2670 mm)
+  2. P1 518, P3 489, P3 489, FOOT 450, FOOT 450 (2421 mm)
+
+### Holes
+
+All holes are 6.5 mm, drilled through the side face, centred in the 90 mm thickness. Positions are measured along the board's outer face (the side away from the centre of the tree) from its bottom long point.
+
+| Part | Square holes (lap bolts) | Level holes (apex and star) |
+| --- | --- | --- |
+| P3 | 358.2, 435.4 | none; base pilot drilled through the rail |
+| P2 | 53.9, 131.1, 474.0, 551.1 | none |
+| P1 | 53.9, 131.1 | 363.8, 418.9, 449.7, 474.0 (24.9° off square, so level when standing) |
+| RAIL | 56.4 from each end, vertical | none |
+| FOOT | 225 (the middle), vertical | none |
+
+The lap positions are for marking. For holes that line up, clamp each lap in place and drill through both boards together.
+
+### Hardware
+
+| Item | Qty | Use |
+| --- | --- | --- |
+| M6 × 110 bolt | 8 | Laps, two per lap |
+| M6 × 110 bolt | 1 | Apex, 90 mm below the tip |
+| M6 × 150 bolt | 1 | Apex, 140 mm below the tip |
+| M6 × 80 and M6 × 100 bolt | 1 each | Star collar, 40 and 62 mm below the tip |
+| M6 nut | 12 | One per bolt |
+| M6 washer | 24 | Both sides of every bolt |
+| M6 × 130 coach screw | 2 | Base: up through foot and rail into each leg |
+
+M6 threaded rod cut to length works in place of any of the bolts.
 
 ## Assembly
-1. Lay out one side: P1 on the outer line, P2 one board-width inside it, P3 one more inside, laps touching face to face. Clamp each lap and drill 6.5 mm through both boards. Repeat for the other side.
-2. Bolt each lap (head on the outside, nut inside, washers both sides).
-3. Stand the two sides on the feet. Screw the feet to the leg ends with a coach screw from below (pilot 4.5 mm).
-4. Fit the rail between the legs at the bottom; fix with a coach screw horizontally through each leg into the rail end (pilot 4.5 mm).
-5. Bring the two tips together. Bolt across at 90 and 140 mm. Fit the star cap over the tips and bolt it at 40 and 62 mm.
-Dismantling after Christmas is the reverse: every joint is a bolt or screw.
 
-## SolidWorks
-`TreeBuilder.cs` + `TreeBuilder.csproj` (.NET Framework 4.8, x64). Set `SWAPI` if SOLIDWORKS is not in the default folder.
-Start SOLIDWORKS from 3DEXPERIENCE first and leave it open; the program attaches to it (it never starts SOLIDWORKS itself).
-Then run `TreeBuilder.exe [folder] [options]`: it writes each part and `PineTree.SLDASM`, with the bolt holes.
-Re-running overwrites the files (it closes any of them that are open in SOLIDWORKS first).
+1. **Cut and mark.** Cut the boards from the cut list, then mark the holes.
+2. **Lay out one side.** Put P1 on the outer line, P2 one board width inside it, and P3 one more inside, with the laps touching face to face. Clamp each lap, drill through both boards, then bolt it with the head outside and the nut inside, washers both sides. Repeat for the other side.
+3. **Join the tips.** Bring the two top uprights together and bolt across at 90 and 140 mm below the tip.
+4. **Fix the base.** Stand the frame on the rail with each leg 20 mm in from the end. Clamp each leg, then drill a 4.5 mm pilot 50 mm deep up through the rail hole into the leg. Put a foot under each end and drive an M6 × 130 coach screw up through foot and rail into the leg.
+5. **Fit the star.** Slide the collar over the tips and bolt it at 40 and 62 mm below the tip.
 
-Build instructions come out with every run, for the current size:
-- `PineTree.PDF` / `PineTree.SLDDRW`: A3 sheet with the front view, balloons, and a BOM listing each part's length, end cuts and hole positions
-- `CutList.csv`: the same table
-- each part carries custom properties `Description`, `Length`, `Ends`, `Holes` (File > Properties)
+To take it apart, reverse the steps.
 
-Hole positions are measured along the board's outer face (away from the centre of the tree) from the bottom long point.
+## The printed star
 
-Options (mm):
-- `--height 1210`: tip of the wood above the floor
-- `--base 622`: length of the base rail (overall width of the base). The bottom uprights stand on the rail,
-  `--RailOverhang` (20) in from each end, and the rail sits on the two feet. The upright slope is worked out from height and base.
-- `--BaseScrewDepth 50`: how far the M6 coach screw (up through foot + rail) goes into each leg's end grain
-- `--L1`, `--L3`: vertical extent of the top / bottom upright (default scales with height, 470 at 1210); the middle one takes the rest
-- `--W 42`, `--T 42`: timber size. `W` is the width seen from the front (in the plane of the tree, also the rail height),
-  `T` the thickness front to back. 90x45 on edge (deep front to back): `--W 45 --T 90`. Feet lie wide face down.
-  The star neck thickness follows `T`, so `stl/star_cap.stl` (42 thick) won't fit other thicknesses.
-- also `--Overlap`, `--FootL`, `--BoltD`, `--StarR`, `--CapNeckH`, `--CapPlateT`, `--StockLen`
-- `--preview`: print the slope, cut list and bolt positions, check the sizes, and stop without touching SOLIDWORKS
+The star and collar are modelled in SOLIDWORKS as `STAR_PLATE` and `STAR_NECK`, and they follow the size you build. Print them as one piece in PETG (or ASA if the tree sits in the sun), star flat on the bed.
 
-Example: `TreeBuilder.exe D:\Projects\christmas-tree\out --height 1500 --base 750`
+`stl/star_cap.stl` is from the original 42 × 42 design (notched star, 18° slot). It does not fit the current tree. Until `geometry_check.py` is updated to the new star, export the two SOLIDWORKS parts to STL instead.
 
-The cut list and hole tables above are for the default size; use the program's printed output for any other size.
-`stl/star_cap.stl` is also the default size only: if the slope changes, the V slot will not match. Use STAR_NECK + STAR_PLATE from SOLIDWORKS (or edit H/PHI in `geometry_check.py`).
-Parts sit in final position and are fixed. Bolt holes are revolve cuts about an in-plane centreline.
-If a call fails, build by hand: sketch each board outline on the Front plane from `geometry_check.py` (the board() polygons), extrude 42 mid-plane.
-`geometry_check.py` regenerates the numbers and the STL (needs shapely, trimesh, manifold3d).
+## Repository
+
+| Path | What it is |
+| --- | --- |
+| `TreeBuilder.cs`, `TreeBuilder.csproj` | The generator (.NET Framework 4.8, x64) |
+| `docs/CAD-as-Code.md` | Guide to the approach, API patterns and an FAQ of problems hit getting started |
+| `geometry_check.py` | The original Python geometry model and STL generator (42 × 42 design; needs shapely, trimesh and manifold3d) |
+| `plane_layout4.png` | Early layout sketch (the base and star have changed since) |
+| `stl/` | Printable star cap from the original design |
+
+## License
+
+MIT. See [License.txt](License.txt).
