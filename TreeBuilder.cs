@@ -48,6 +48,8 @@ namespace PineTree
         public double CapNeckH = 0;     // printed cap neck thickness (front to back); 0 = same as T
         public double CapPlateT = 12;   // printed star plate thickness
         public double StarR = 85;       // star outer radius
+        public double StarGap = 3;      // gap between the wood tip and the star's bottom notch
+        public double CapWall = 8;      // wall thickness of the printed collar around the top tips
         public double StockLen = 1800;  // length of the pine you buy (only used for a warning)
 
         // Derived: slope of the uprights from vertical, solved so the base comes out at BaseWidth.
@@ -332,31 +334,32 @@ namespace PineTree
                 Bolts = { new Bolt(0, -footH / 2, 0, 1, railLen) }
             });
 
-            // ---- printed star cap (same rules as geometry_check.py) ----
-            // Neck: block from 72 below to 8 above the apex, with a V slot (2 x slope, 0.4 mm clearance)
-            // the two top tips sit in. It widens if the slope gets steeper, keeping 10 mm of wall.
-            double clr = 0.4, ytip = ha + clr / sin, yb = ha - 72, yt = ha + 8;
-            double nh = Math.Max(34, Math.Ceiling((ytip - yb) * tan + 10));
-            double sx = (ytip - (yb - 1)) * tan;
-            var capBolts = new List<Bolt> { new Bolt(0, ha - 40, 1, 0, 2 * nh + 20), new Bolt(0, ha - 62, 1, 0, 2 * nh + 20) };
-            list.Add(new PartDef
-            {
-                Name = "STAR_NECK", Stock = printed, Depth = c.CapNeckH, Bolts = capBolts,
-                Pts = Rect(-nh, yb, nh, yt),
-                Cuts = { new List<double[]> { P(-sx, yb - 1), P(0, ytip), P(sx, yb - 1) } }
-            });
-            // Plate: 5-point star centred 45 above the apex, minus the neck block (they touch, no overlap).
-            double yc = ha + 45, ri = 0.4 * c.StarR;
+            // ---- printed star cap: a full star held up by a collar that continues the tree's outline ----
+            // Star: complete 5-point star. Its bottom notch (inner vertex) sits StarGap above the wood tip, so the
+            // star never touches the wood and looks like it is carried by the tree.
+            double ri = 0.4 * c.StarR, yc = ha + c.StarGap + ri;
             var star = Enumerable.Range(0, 10).Select(k =>
             {
                 double r = k % 2 == 0 ? c.StarR : ri, ang = (90 + 36 * k) * Math.PI / 180;
                 return P(r * Math.Cos(ang), yc + r * Math.Sin(ang));
             }).ToList();
+            list.Add(new PartDef { Name = "STAR_PLATE", Stock = printed, Depth = c.CapPlateT, Pts = star });
+
+            // Collar: tapered sleeve over the two top tips, 72 deep. Its sides run parallel to the outside of the
+            // top uprights, CapWall out, and meet in a point inside the star, so the tree's outline carries on
+            // up into the star. Inside: the V slot the tips sit in (0.4 mm clearance). The part of the collar
+            // inside the star outline is cut away here (the star part has it); printed, the two are one piece.
+            double clr = 0.4, ytip = ha + clr / sin, yb = ha - 72;
+            double xb = (ha - yb) * tan + c.CapWall / cos, ypk = ha + c.CapWall / sin;
+            double sx = (ytip - (yb - 1)) * tan;
+            Func<double, double> collarHalf = y => (ha - y) * tan + c.CapWall / cos;
+            var capBolts = new List<Bolt> {
+                new Bolt(0, ha - 40, 1, 0, 2 * collarHalf(ha - 40) + 20), new Bolt(0, ha - 62, 1, 0, 2 * collarHalf(ha - 62) + 20) };
             list.Add(new PartDef
             {
-                Name = "STAR_PLATE", Stock = printed, Depth = c.CapPlateT,
-                Pts = star,
-                Cuts = { Rect(-nh, yb - 1, nh, yt) }
+                Name = "STAR_NECK", Stock = printed, Depth = c.CapNeckH, Bolts = capBolts,
+                Pts = new List<double[]> { P(-xb, yb), P(xb, yb), P(0, ypk) },
+                Cuts = { new List<double[]> { P(-sx, yb - 1), P(0, ytip), P(sx, yb - 1) }, star }
             });
             Describe(c, list);
             return list;
@@ -386,7 +389,7 @@ namespace PineTree
             {
                 if (d.Printed)
                 {
-                    d.Props["Description"] = d.Name == "STAR_NECK" ? "Star cap neck (printed with plate)" : "Star plate (printed with neck)";
+                    d.Props["Description"] = d.Name == "STAR_NECK" ? "Star collar (printed with star)" : "Star (printed with collar)";
                     d.Props["Length"] = "-";
                     d.Props["Ends"] = "-";
                     d.Props["Holes"] = d.Bolts.Count > 0 ? "printed in (star_cap.stl)" : "-";
@@ -868,6 +871,35 @@ namespace PineTree
                 var ann = (Annotation)note.GetAnnotation();
                 ann.SetPosition2(sw - 0.010 - tableW, sh - 0.010 - tableH - 0.012, 0);   // under the BOM
             }
+
+            // Detail A: the star and collar at 1:2.5, under the notes.
+            try
+            {
+                double ri = 0.4 * c.StarR, top = c.H + c.StarGap + ri + c.StarR, bot = c.H - 72;
+                double cy = (top + bot) / 2, rad = Math.Max((top - bot) / 2, c.StarR) + 8;   // model mm
+                var mu = (MathUtility)app.GetMathUtility();
+                var pt = (MathPoint)mu.CreatePoint(new double[] { 0, cy * MM, 0 });
+                pt = (MathPoint)pt.MultiplyTransform((MathTransform)view.ModelToViewTransform);
+                double[] sp = (double[])pt.ArrayData;                       // sheet coordinates
+                dd.ActivateView(view.Name);
+                // A view's sketch has its own coordinates: map the sheet centre and a rim point into them.
+                var toSketch = (MathTransform)((Sketch)view.GetSketch()).ModelToSketchTransform;
+                Func<double, double, double[]> sk = (x, y) =>
+                    (double[])((MathPoint)((MathPoint)mu.CreatePoint(new double[] { x, y, 0 })).MultiplyTransform(toSketch)).ArrayData;
+                double[] c0 = sk(sp[0], sp[1]), c1 = sk(sp[0] + rad * MM * scale, sp[1]);
+                double rSk = Math.Sqrt((c1[0] - c0[0]) * (c1[0] - c0[0]) + (c1[1] - c0[1]) * (c1[1] - c0[1]));
+                var circle = (SketchSegment)dm.SketchManager.CreateCircleByRadius(c0[0], c0[1], 0, rSk);
+                if (circle == null) throw new Exception("no circle");
+                circle.Select4(false, null);
+                var det = dd.CreateDetailViewAt4(sw * 0.62, sh * 0.20, 0,
+                    (int)swDetViewStyle_e.swDetViewSTANDARD, 1, 2.5, "A",
+                    (int)swDetCircleShowType_e.swDetCircleCIRCLE, false, false, false, 5);
+                Console.WriteLine(det != null ? "  detail A (star) at 1:2.5" : "  (detail view not created)");
+                dm.ClearSelection2(true);
+            }
+            catch (Exception ex) { Console.WriteLine("  (detail view skipped: " + ex.Message + ")"); }
+            // Leave the view's sketch so the drawing isn't left mid-edit (an active view blocks closing it later).
+            try { dd.ActivateSheet(sheet.GetName()); dm.ClearSelection2(true); } catch (Exception) { }
 
             dm.EditRebuild3();
             SaveDoc(dm, Path.Combine(dir, "PineTree.SLDDRW"));
