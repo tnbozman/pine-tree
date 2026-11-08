@@ -38,8 +38,8 @@ namespace PineTree
         public double BaseWidth = 922;  // length of the base rail = overall width of the base
         public double RailOverhang = 20;    // rail sticks out this far past the outside of each leg
         public double BaseScrewDepth = 50;  // how far the base coach screw goes into the leg end grain
-        public double W = 42;           // board width seen from the front (in the plane of the tree); also the rail height
-        public double T = 42;           // board thickness front to back (e.g. 90x45 on edge: --W 45 --T 90)
+        public double W = 45;           // board width seen from the front (in the plane of the tree); also the rail height
+        public double T = 90;           // board thickness front to back (e.g. 90x45 on edge: --W 45 --T 90)
         public double Overlap = 130;    // vertical overlap of each lap
         public double L3 = 0;           // vertical extent of bottom upright; 0 = auto (470 at H 1210, scales with H)
         public double L1 = 0;           // vertical extent of top upright; 0 = auto (same rule). Middle one takes the rest.
